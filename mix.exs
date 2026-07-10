@@ -17,6 +17,7 @@ defmodule PaseoRelay.MixProject do
   defp deps do
     [
       {:bandit, "~> 1.8"},
+      {:dns_cluster, "~> 0.2.0"},
       {:jason, "~> 1.4"},
       {:plug, "~> 1.18"},
       {:websock_adapter, "~> 0.5"},

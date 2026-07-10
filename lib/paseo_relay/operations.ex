@@ -17,10 +17,10 @@ defmodule PaseoRelay.Operations do
   end
 
   get "/ready" do
-    if draining?(conn) or not PaseoRelay.Ownership.ready?() do
-      send_json(conn, 503, "draining")
-    else
+    if ready?(conn) do
       send_json(conn, 200, "ready")
+    else
+      send_json(conn, 503, "unready")
     end
   end
 
@@ -29,7 +29,7 @@ defmodule PaseoRelay.Operations do
       [
         "# HELP paseo_relay_ready Whether this node admits new relay work.",
         "# TYPE paseo_relay_ready gauge",
-        "paseo_relay_ready #{if(draining?(conn), do: 0, else: 1)}",
+        "paseo_relay_ready #{if(ready?(conn), do: 1, else: 0)}",
         "# HELP paseo_relay_draining Whether this node is draining.",
         "# TYPE paseo_relay_draining gauge",
         "paseo_relay_draining #{if(draining?(conn), do: 1, else: 0)}",
@@ -51,6 +51,8 @@ defmodule PaseoRelay.Operations do
     _ = conn
     PaseoRelay.Drain.draining?()
   end
+
+  defp ready?(conn), do: not draining?(conn) and PaseoRelay.Ownership.ready?()
 
   defp send_json(conn, status, state) do
     conn

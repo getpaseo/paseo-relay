@@ -203,7 +203,20 @@ defmodule PaseoRelay.Registry do
         pending: %{}
       })
 
-  defp put_session(state, server_id, session), do: put_in(state.sessions[server_id], session)
+  defp put_session(state, server_id, session) do
+    if empty?(session) do
+      %{state | sessions: Map.delete(state.sessions, server_id)}
+    else
+      put_in(state.sessions[server_id], session)
+    end
+  end
+
+  defp empty?(session) do
+    session.v1.server == nil and session.v1.client == nil and session.control == nil and
+      map_size(session.clients) == 0 and map_size(session.data) == 0 and
+      map_size(session.pending) == 0
+  end
+
   defp opposite(:server), do: :client
   defp opposite(:client), do: :server
   defp deliver(nil, _opcode, _payload), do: :ok

@@ -1,4 +1,7 @@
 app = "replace-with-your-app"
+primary_region = "ams"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
 
 [build]
   dockerfile = "deployment/fly/Dockerfile"
@@ -6,24 +9,31 @@ app = "replace-with-your-app"
 [env]
   PASEO_RELAY_HOST = "0.0.0.0"
   PASEO_RELAY_PORT = "4000"
-  PASEO_RELAY_INTERNAL_PORT = "4001"
   PASEO_RELAY_MIN_CLUSTER_SIZE = "2"
 
-[[services]]
+[http_service]
   internal_port = 4000
-  protocol = "tcp"
-  auto_stop_machines = "off"
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
   min_machines_running = 2
 
-  [[services.ports]]
-    port = 80
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 20000
+    hard_limit = 50000
 
-  [[services.ports]]
-    port = 443
-    handlers = ["tls"]
-
-  [[services.http_checks]]
+  [[http_service.checks]]
     interval = "10s"
     timeout = "2s"
+    grace_period = "15s"
     method = "GET"
     path = "/ready"
+
+[deploy]
+  strategy = "rolling"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

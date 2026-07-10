@@ -24,6 +24,8 @@ defmodule PaseoRelay.Socket do
   def handle_info({:relay_close, code, reason}, state),
     do: {:stop, :normal, {code, reason}, state}
 
+  def handle_info(_message, state), do: {:ok, state}
+
   @impl true
   def terminate(_reason, %{owner: owner}) do
     PaseoRelay.Registry.detach(self())

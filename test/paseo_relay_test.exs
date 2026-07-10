@@ -121,15 +121,14 @@ defmodule PaseoRelay.DistributedOwnershipTest do
 
     local_session =
       spawn(fn ->
-        assert :local = Ownership.claim("server-e", "opaque-owner-a")
-        send(parent, :claimed)
+        send(parent, {:claimed, Ownership.claim("server-e", "opaque-owner-a")})
 
         receive do
           :stop -> :ok
         end
       end)
 
-    assert_receive :claimed
+    assert_receive {:claimed, :local}
     owner_record = Ownership.owner_pid("server-e")
     owner_down = Process.monitor(owner_record)
     Process.exit(local_session, :kill)

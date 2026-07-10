@@ -14,3 +14,15 @@
 
 - Red: `mix test test/relay_protocol_test.exs:102` timed out waiting for the replacement daemon data socket after the displaced socket's termination deleted the new route.
 - Green: the registry now deletes a v2 data route only when its current owner disconnects; the focused real-WebSocket test passes.
+
+## distributed ownership and reroute
+
+- Red: the real peer-node test exposed that tying ownership to the first request could move an otherwise active session when that request process exited.
+- Green: a per-`serverId` owner now reserves upgrades, monitors every attached WebSocket, expires abandoned reservations, and remains authoritative until the whole session is idle. Real `:peer` tests cover concurrent claims, remote lookup, owner loss, and takeover.
+- Red: the pre-upgrade router test reached WebSocket negotiation on a non-owner node.
+- Green: the non-owner now returns the configured opaque reroute response before upgrade; the owner still completes a real Bandit WebSocket handshake.
+
+## public identifier bounds
+
+- Red: a 257-byte `serverId` completed a `101 Switching Protocols` response and claimed distributed ownership.
+- Green: identifiers longer than 256 bytes now receive `400` before ownership, while empty client connection IDs retain the compatible generated-ID behavior.

@@ -1,6 +1,8 @@
 defmodule PaseoRelay.Ownership do
   @moduledoc false
 
+  alias PaseoRelay.Ownership.Owner
+
   @claim_timeout 1_000
 
   def route(server_id, target) do
@@ -17,6 +19,7 @@ defmodule PaseoRelay.Ownership do
     case route(server_id, target) do
       {:local, owner, reservation} ->
         :ok = Owner.attach(owner, reservation, session_owner)
+        :ok = Owner.legacy(owner, session_owner)
         :local
 
       other ->
@@ -32,6 +35,8 @@ defmodule PaseoRelay.Ownership do
     end
   end
 
+  def owner_pid(server_id), do: :global.whereis_name(name(server_id))
+
   def ready?,
     do: length(Node.list()) + 1 >= Application.get_env(:paseo_relay, :minimum_cluster_size, 1)
 
@@ -39,7 +44,7 @@ defmodule PaseoRelay.Ownership do
 
   defp claim_route(server_id, target) do
     cond do
-      PaseoRelay.Drain.draining?() -> {:unavailable, :draining}
+      draining?() -> {:unavailable, :draining}
       not ready?() -> {:unavailable, :cluster}
       true -> transact(server_id, target)
     end
@@ -69,11 +74,14 @@ defmodule PaseoRelay.Ownership do
       :undefined ->
         {:ok, owner} = Owner.start(server_id, target)
 
-        if :global.register_name(name(server_id), owner) do
-          route_owner(owner)
-        else
-          Process.exit(owner, :shutdown)
-          route_owner(:global.whereis_name(name(server_id)))
+        case :global.register_name(name(server_id), owner) do
+          :yes ->
+            :global.sync()
+            route_owner(owner)
+
+          :no ->
+            Process.exit(owner, :shutdown)
+            route_owner(:global.whereis_name(name(server_id)))
         end
     end
   end
@@ -94,6 +102,10 @@ defmodule PaseoRelay.Ownership do
       :unavailable -> {:unavailable, :owner}
     end
   end
+
+  defp draining? do
+    if Process.whereis(PaseoRelay.Drain), do: PaseoRelay.Drain.draining?(), else: false
+  end
 end
 
 defmodule PaseoRelay.Ownership.Owner do
@@ -109,6 +121,7 @@ defmodule PaseoRelay.Ownership.Owner do
     do: GenServer.call(owner, {:attach, reservation, socket}, 1_000)
 
   def detach(owner, socket), do: GenServer.cast(owner, {:detach, socket})
+  def legacy(owner, socket), do: GenServer.call(owner, {:legacy, socket}, 1_000)
 
   def target(owner) do
     try do
@@ -121,7 +134,16 @@ defmodule PaseoRelay.Ownership.Owner do
   @impl true
   def init({server_id, target}) do
     PaseoRelay.Metrics.inc(:active_sessions)
-    {:ok, %{server_id: server_id, target: target, reservations: %{}, sockets: %{}, idle: nil}}
+
+    {:ok,
+     %{
+       server_id: server_id,
+       target: target,
+       reservations: %{},
+       sockets: %{},
+       idle: nil,
+       legacy: nil
+     }}
   end
 
   @impl true
@@ -152,6 +174,10 @@ defmodule PaseoRelay.Ownership.Owner do
     end
   end
 
+  def handle_call({:legacy, socket}, _from, state) do
+    {:reply, :ok, %{state | legacy: Process.monitor(socket)}}
+  end
+
   @impl true
   def handle_cast({:detach, socket}, state), do: {:noreply, remove_socket(state, socket)}
 
@@ -160,8 +186,13 @@ defmodule PaseoRelay.Ownership.Owner do
     do:
       {:noreply, state |> Map.update!(:reservations, &Map.delete(&1, token)) |> idle_when_empty()}
 
-  def handle_info({:DOWN, ref, :process, socket, _}, state) when state.sockets[socket] == ref,
-    do: {:noreply, remove_socket(state, socket)}
+  def handle_info({:DOWN, ref, :process, socket, _}, state) do
+    cond do
+      state[:legacy] == ref -> {:stop, :normal, state}
+      Map.get(state.sockets, socket) == ref -> {:noreply, remove_socket(state, socket)}
+      true -> {:noreply, state}
+    end
+  end
 
   def handle_info(:idle, %{reservations: reservations, sockets: sockets} = state)
       when map_size(reservations) == 0 and map_size(sockets) == 0, do: {:stop, :normal, state}

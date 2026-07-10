@@ -15,6 +15,24 @@ defmodule PaseoRelay.RouterIntegrationTest do
     :gen_tcp.close(socket)
   end
 
+  test "oversized route identifiers are rejected before they can claim ownership", %{port: port} do
+    server_id = String.duplicate("s", 257)
+
+    assert "HTTP/1.1 400" <> _ =
+             request(port, "/ws?serverId=#{server_id}&role=client&v=2", websocket_headers())
+
+    assert :undefined == PaseoRelay.Ownership.owner_pid(server_id)
+
+    connection_id = String.duplicate("c", 257)
+
+    assert "HTTP/1.1 400" <> _ =
+             request(
+               port,
+               "/ws?serverId=srv_bounded&role=server&connectionId=#{connection_id}&v=2",
+               websocket_headers()
+             )
+  end
+
   test "health is live while readiness blocks new websocket ownership", %{port: port} do
     Application.put_env(:paseo_relay, :minimum_cluster_size, 2)
     on_exit(fn -> Application.delete_env(:paseo_relay, :minimum_cluster_size) end)
@@ -29,34 +47,32 @@ defmodule PaseoRelay.RouterIntegrationTest do
   test "a remote owner returns a reroute response before websocket negotiation", %{port: port} do
     {peer, peer_node} = start_peer()
     server_id = "srv_remote_#{System.unique_integer([:positive])}"
-    on_exit(fn -> :peer.stop(peer) end)
+
+    on_exit(fn ->
+      try do
+        :peer.stop(peer)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
 
     {:local, _owner, _reservation} =
-      :rpc.call(peer_node, PaseoRelay.Ownership, :resolve, [server_id])
+      :rpc.call(peer_node, PaseoRelay.Ownership, :route, [server_id, "peer-target"])
 
     owner = :global.whereis_name({PaseoRelay.Ownership, server_id})
     assert is_pid(owner)
     assert node(owner) == peer_node
 
-    Application.put_env(:paseo_relay, :target_mapper, &Atom.to_string/1)
-    Application.put_env(:paseo_relay, :reroute_renderer, &__MODULE__.reroute/2)
-
-    on_exit(fn ->
-      Application.delete_env(:paseo_relay, :target_mapper)
-      Application.delete_env(:paseo_relay, :reroute_renderer)
-    end)
-
     response = request(port, "/ws?serverId=#{server_id}&role=client&v=2", websocket_headers())
     assert "HTTP/1.1 409" <> _ = response
-    assert response =~ "x-reroute-target: #{peer_node}"
+    assert response =~ "x-reroute-target: peer-target"
     assert response =~ "content-length: 0"
   end
 
   test "metrics exposes local names and values", %{port: port} do
     before = PaseoRelay.Metrics.snapshot()
     {socket, _response} = open_websocket(port, "srv_metrics")
-    :ok = :gen_tcp.send(socket, <<137, 128, 0, 0, 0, 0>>)
-    await_pong(socket)
+    {:ok, _sync_frame} = :gen_tcp.recv(socket, 0, 2_000)
     metrics = request(port, "/metrics")
 
     assert metric_value(metrics, "active_websockets") == before.active_websockets + 1
@@ -114,12 +130,6 @@ defmodule PaseoRelay.RouterIntegrationTest do
     String.to_integer(value)
   end
 
-  def reroute(conn, target) do
-    conn
-    |> Plug.Conn.put_resp_header("x-reroute-target", target)
-    |> Plug.Conn.send_resp(409, "")
-  end
-
   defp start_peer do
     {:ok, peer, peer_node} =
       :peer.start_link(%{
@@ -128,14 +138,15 @@ defmodule PaseoRelay.RouterIntegrationTest do
       })
 
     :ok = :rpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+
+    :ok =
+      :rpc.call(peer_node, :application, :set_env, [
+        :paseo_relay,
+        :operations,
+        [host: "127.0.0.1", ip: {127, 0, 0, 1}, port: 0, drain: false]
+      ])
+
     assert {:ok, _apps} = :rpc.call(peer_node, :application, :ensure_all_started, [:paseo_relay])
     {peer, peer_node}
-  end
-
-  defp await_pong(socket) do
-    case :gen_tcp.recv(socket, 0, 2_000) do
-      {:ok, <<138, 0>>} -> :ok
-      {:ok, _frame} -> await_pong(socket)
-    end
   end
 end

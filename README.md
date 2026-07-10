@@ -2,7 +2,7 @@
 
 A distributed, protocol-compatible relay for [Paseo](https://github.com/getpaseo/paseo).
 
-Paseo Relay keeps its public WebSocket protocol independent from its deployment platform. Nodes use OTP only for discovery and route ownership; frames stay in memory on one node or travel directly over TCP between nodes.
+Paseo Relay keeps its public WebSocket protocol independent from its deployment platform. Nodes use OTP only for discovery and route ownership. A deployment adapter reroutes WebSocket upgrades to the owning node, so frames stay inside one BEAM node.
 
 This project is under active development and its internal protocols may change without notice.
 
@@ -25,10 +25,13 @@ generic:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `PASEO_RELAY_HOST` | `127.0.0.1` | Advertised relay host for future routing wiring. |
+| `PASEO_RELAY_HOST` | `127.0.0.1` | Public listener IP. |
 | `PASEO_RELAY_PORT` | `4000` | Public HTTP/WebSocket listener. |
-| `PASEO_RELAY_INTERNAL_PORT` | `4001` | Reserved internal relay transport port. |
 | `PASEO_RELAY_DRAIN` | `false` | Start not-ready while existing sessions drain. |
+| `PASEO_RELAY_OWNERSHIP_TARGET` | `local` | Opaque target advertised to other relay nodes. |
+| `PASEO_RELAY_REROUTE_HEADER` | `x-reroute-target` | Response header used by the deployment adapter. |
+| `PASEO_RELAY_CLUSTER_QUERY` | unset | Optional DNS query used to discover BEAM peers. |
+| `PASEO_RELAY_MIN_CLUSTER_SIZE` | `1` | Minimum nodes required before accepting unowned sessions. |
 | `RELEASE_NODE` / `RELEASE_COOKIE` | unset | Standard distributed-release identity. |
 
 `GET /health` is a liveness probe. `GET /ready` returns `200` only while the

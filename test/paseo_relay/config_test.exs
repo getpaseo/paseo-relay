@@ -10,7 +10,6 @@ defmodule PaseoRelay.ConfigTest do
                 host: "127.0.0.1",
                 ip: {127, 0, 0, 1},
                 port: 4000,
-                internal_port: 4001,
                 drain: false,
                 node_name: nil,
                 cookie: nil

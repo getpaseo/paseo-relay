@@ -3,9 +3,16 @@ defmodule PaseoRelay.Application do
 
   @impl true
   def start(_type, _args) do
-    operations = Application.get_env(:paseo_relay, :operations, [])
+    operations =
+      Application.get_env(:paseo_relay, :operations,
+        host: "127.0.0.1",
+        ip: {127, 0, 0, 1},
+        port: 4000,
+        drain: false
+      )
 
     children = [
+      {DNSCluster, query: Application.get_env(:paseo_relay, :cluster_query) || :ignore},
       {PaseoRelay.Drain, Keyword.fetch!(operations, :drain)},
       PaseoRelay.Metrics,
       PaseoRelay.Registry,

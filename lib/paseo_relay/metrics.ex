@@ -37,6 +37,17 @@ defmodule PaseoRelay.Metrics do
     {:ok, :metrics}
   end
 
-  defp counters, do: :persistent_term.get(__MODULE__)
+  defp counters do
+    case :persistent_term.get(__MODULE__, nil) do
+      nil ->
+        counters = :counters.new(length(@names), [:write_concurrency])
+        :persistent_term.put(__MODULE__, counters)
+        counters
+
+      counters ->
+        counters
+    end
+  end
+
   defp index(name), do: Enum.find_index(@names, &(&1 == name)) + 1
 end

@@ -4,7 +4,6 @@ defmodule PaseoRelay.Config do
   @defaults %{
     host: "127.0.0.1",
     port: 4000,
-    internal_port: 4001,
     drain: false,
     node_name: nil,
     cookie: nil
@@ -17,15 +16,12 @@ defmodule PaseoRelay.Config do
 
     with {:ok, ip} <- ip(host),
          {:ok, port} <- port(environment, "PASEO_RELAY_PORT", @defaults.port),
-         {:ok, internal_port} <-
-           port(environment, "PASEO_RELAY_INTERNAL_PORT", @defaults.internal_port),
          {:ok, drain} <- boolean(environment, "PASEO_RELAY_DRAIN", @defaults.drain) do
       {:ok,
        %{
          host: host,
          ip: ip,
          port: port,
-         internal_port: internal_port,
          drain: drain,
          node_name: Map.get(environment, "RELEASE_NODE"),
          cookie: Map.get(environment, "RELEASE_COOKIE")

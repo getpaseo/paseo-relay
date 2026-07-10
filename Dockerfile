@@ -14,8 +14,7 @@ COPY --from=build /app/_build/prod/rel/paseo_relay ./
 ENV HOME=/app \
     PASEO_RELAY_HOST=0.0.0.0 \
     PASEO_RELAY_PORT=4000 \
-    PASEO_RELAY_INTERNAL_PORT=4001 \
     PASEO_RELAY_DRAIN=false
-EXPOSE 4000 4001
+EXPOSE 4000
 ENTRYPOINT ["/app/bin/paseo_relay"]
 CMD ["start"]
