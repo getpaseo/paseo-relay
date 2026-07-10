@@ -3,13 +3,16 @@ defmodule PaseoRelay.Application do
 
   @impl true
   def start(_type, _args) do
-    port = Application.get_env(:paseo_relay, :port, 4000)
+    operations = Application.get_env(:paseo_relay, :operations, [])
 
     children = [
+      {PaseoRelay.Drain, Keyword.fetch!(operations, :drain)},
       PaseoRelay.Registry,
       {Bandit,
        plug: PaseoRelay.Router,
-       port: port,
+       scheme: :http,
+       ip: Keyword.fetch!(operations, :ip),
+       port: Keyword.fetch!(operations, :port),
        websocket_options: [max_frame_size: 32 * 1024 * 1024, compress: false]}
     ]
 

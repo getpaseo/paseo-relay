@@ -1,0 +1,20 @@
+app = "replace-with-your-app"
+
+[build]
+  dockerfile = "deployment/fly/Dockerfile"
+
+[env]
+  PASEO_RELAY_HOST = "0.0.0.0"
+  PASEO_RELAY_PORT = "4000"
+  PASEO_RELAY_INTERNAL_PORT = "4001"
+
+[[services]]
+  internal_port = 4000
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 80
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls"]
