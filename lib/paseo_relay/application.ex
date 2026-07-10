@@ -21,6 +21,7 @@ defmodule PaseoRelay.Application do
        scheme: :http,
        ip: Keyword.fetch!(operations, :ip),
        port: Keyword.fetch!(operations, :port),
+       thousand_island_options: [num_connections: 65_536],
        websocket_options: [max_frame_size: 32 * 1024 * 1024, compress: false]}
     ]
 

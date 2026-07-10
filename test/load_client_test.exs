@@ -71,6 +71,37 @@ defmodule PaseoRelay.LoadClientTest do
     stop_relay(relay_pid)
   end
 
+  @tag :relay
+  test "a sharded run can omit the shared control socket", %{port: port} do
+    {output, status} =
+      System.cmd("node", [
+        "scripts/relay-load.mjs",
+        "--endpoints",
+        "ws://127.0.0.1:#{port}/ws",
+        "--server-id",
+        "shared-load-server",
+        "--connection-prefix",
+        "shard-a",
+        "--no-control",
+        "--pairs",
+        "2",
+        "--scenario",
+        "burst",
+        "--burst",
+        "1",
+        "--duration",
+        "0.2"
+      ])
+
+    result = Jason.decode!(output)
+
+    assert status == 0
+    assert result["requested_websockets"] == 4
+    assert result["connection_successes"] == 4
+    assert result["frames_received"] == 4
+    assert result["connection_failures"] == 0
+  end
+
   defp available_port do
     {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
     {:ok, port} = :inet.port(socket)

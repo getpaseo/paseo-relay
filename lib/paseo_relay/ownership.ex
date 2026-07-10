@@ -3,7 +3,7 @@ defmodule PaseoRelay.Ownership do
 
   alias PaseoRelay.Ownership.Owner
 
-  @claim_timeout 1_000
+  @claim_timeout 5_000
 
   def route(server_id, target) do
     case :global.whereis_name(name(server_id)) do

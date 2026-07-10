@@ -26,3 +26,8 @@
 
 - Red: a 257-byte `serverId` completed a `101 Switching Protocols` response and claimed distributed ownership.
 - Green: identifiers longer than 256 bytes now receive `400` before ownership, while empty client connection IDs retain the compatible generated-ID behavior.
+
+## sharded load generation
+
+- Red: a real black-box run requesting `--no-control` still opened five WebSockets for two pairs because every load process unconditionally opened its own daemon control socket.
+- Green: sharded runs can omit that single shared socket and use an explicit connection-ID prefix. A real Bandit/WebSocket test verifies four data sockets, bidirectional frames, and clean shutdown without importing relay internals.

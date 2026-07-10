@@ -35,10 +35,10 @@ generic:
 | `RELEASE_NODE` / `RELEASE_COOKIE` | unset | Standard distributed-release identity. |
 
 `GET /health` is a liveness probe. `GET /ready` returns `200` only while the
-node accepts new work, and returns `503 {"status":"draining"}` once
-`PaseoRelay.Drain.begin/0` is called. `GET /metrics` is Prometheus text and
-currently exposes readiness/draining gauges; connection and frame counters are
-reserved for the routing lane, which owns those events.
+node accepts new work, and returns `503 {"status":"unready"}` while draining
+or below the configured cluster floor. `GET /metrics` is Prometheus text and
+exposes readiness, draining, active WebSockets, active sessions, reroutes,
+forwarded frames, and forwarded bytes for the local node.
 
 Build a production release with `MIX_ENV=prod asdf exec mix release`, or build
 the generic container with `docker build -t paseo-relay .`. The explicit
@@ -62,11 +62,16 @@ node scripts/relay-load.mjs --scenario idle --pairs 10 --duration 10
 node scripts/relay-load.mjs --scenario sustained --pairs 10 --rate 10 --duration 10
 ```
 
-Two-node localhost test (after starting relays on ports 4000 and 4002):
+Distributed ownership and reroute decisions are exercised with real local BEAM
+peer nodes in the test suite:
 
 ```sh
-node scripts/relay-load.mjs --endpoints ws://127.0.0.1:4000/ws,ws://127.0.0.1:4002/ws --scenario burst --burst 100
+mix test test/paseo_relay/router_integration_test.exs test/paseo_relay_test.exs
 ```
+
+A multi-node data test must run behind a deployment adapter capable of replaying
+the original WebSocket upgrade. The Fly adapter uses `fly-replay`; all load
+clients still use one public endpoint and the proxy performs node placement.
 
 Capacity tests need an appropriate file-descriptor limit and kernel socket
 budget. Example high-load commands, deliberately not defaults:
@@ -83,3 +88,8 @@ frames = 10,000 frames/s. The 50,000-socket target is 25,000 pairs plus one
 control socket. `--batch-size` bounds concurrent opens; `--ramp-ms` spaces each
 batch. `--duration` measures steady traffic only, while JSON reports setup and
 steady durations separately.
+
+To distribute a run across load generators, open the daemon control socket on
+one generator and pass `--no-control` to the others. Give every generator a
+different `--connection-prefix`; they can then share one `--server-id` without
+connection ID collisions, exercising a single relay owner through reroutes.

@@ -13,6 +13,8 @@ const usage = `Usage: node scripts/relay-load.mjs [options]
   --server-id <id>          v2 serverId (default: load-server)
   --pairs <n>               Paired client/server data sockets (default: 10)
   --connections <n>         Backward-compatible alias for --pairs
+  --connection-prefix <id>  Unique connection ID prefix for sharded runs
+  --no-control              Do not open the shared v2 daemon control socket
   --batch-size <n>          Maximum pairs opened concurrently (default: 100)
   --ramp-ms <milliseconds>  Delay between opening batches (default: 0)
   --scenario <name>         idle, sustained, burst, or reconnect (default: idle)
@@ -55,6 +57,8 @@ function args(argv) {
   }
   return {
     endpoints, serverId: value("--server-id", "load-server"), scenario,
+    connectionPrefix: value("--connection-prefix", String(process.pid)),
+    control: !argv.includes("--no-control"),
     pairs: argv.includes("--pairs") ? integer("--pairs", 10) : integer("--connections", 10),
     batchSize: integer("--batch-size", 100, 1), rampMs: number("--ramp-ms", 0),
     durationMs: number("--duration", 10) * 1000, rate: number("--rate", 10),
@@ -95,7 +99,13 @@ function open(url, stats) {
     }, 10_000);
     state.waitForClose = new Promise((resolveClose) => { state.resolveClose = resolveClose; });
     socket.addEventListener("open", () => { state.opened = true; clearTimeout(timeout); stats.connection_successes += 1; resolve(socket); }, { once: true });
-    socket.addEventListener("error", () => { fail(); if (!state.opened) { clearTimeout(timeout); reject(new Error("WebSocket connection failed")); } }, { once: true });
+    socket.addEventListener("error", (event) => {
+      fail();
+      if (!state.opened) {
+        clearTimeout(timeout);
+        reject(new Error(`WebSocket connection failed${event.message ? `: ${event.message}` : ""}`));
+      }
+    }, { once: true });
     socket.addEventListener("close", (event) => {
       state.closed = true;
       state.resolveClose();
@@ -107,7 +117,7 @@ function open(url, stats) {
 }
 
 async function connectPair(options, index, stats, latencies) {
-  const connectionId = `load-${process.pid}-${index}`;
+  const connectionId = `load-${options.connectionPrefix}-${index}`;
   const serverEndpoint = options.endpoints[0];
   const clientIndex = Number(String(index).split("-").at(-1));
   const clientEndpoint = options.endpoints[(clientIndex + 1) % options.endpoints.length];
@@ -139,8 +149,14 @@ async function connectPairs(options, wave, stats, latencies) {
   const pairs = [];
   for (let first = 0; first < options.pairs; first += options.batchSize) {
     const size = Math.min(options.batchSize, options.pairs - first);
-    pairs.push(...await Promise.all(Array.from({ length: size }, (_, offset) =>
-      connectPair(options, `${wave}-${first + offset}`, stats, latencies))));
+    const results = await Promise.allSettled(Array.from({ length: size }, (_, offset) =>
+      connectPair(options, `${wave}-${first + offset}`, stats, latencies)));
+    pairs.push(...results.filter(({ status }) => status === "fulfilled").map(({ value }) => value));
+    const failure = results.find(({ status }) => status === "rejected");
+    if (failure) {
+      await finish(pairs.flatMap(Object.values), stats);
+      throw failure.reason;
+    }
     if (first + size < options.pairs && options.rampMs) await sleep(options.rampMs);
   }
   return pairs;
@@ -187,7 +203,9 @@ async function main() {
   let pairs = [];
   let control;
   try {
-    control = await open(endpoint(options.endpoints[0], { serverId: options.serverId, role: "server", v: "2" }), stats);
+    if (options.control) {
+      control = await open(endpoint(options.endpoints[0], { serverId: options.serverId, role: "server", v: "2" }), stats);
+    }
     const waves = options.scenario === "reconnect" ? options.reconnects + 1 : 1;
     for (let wave = 0; wave < waves; wave += 1) {
       pairs = await connectPairs(options, wave, stats, latencies);
@@ -218,7 +236,8 @@ async function main() {
   const relay = sampleRelay(options.relayPid);
   process.stdout.write(`${JSON.stringify({
     protocol: { version: 2, roles: ["server-data", "client"] }, scenario: options.scenario,
-    endpoints: options.endpoints, requested_pairs: options.pairs, requested_websockets: options.pairs * 2 + 1,
+    endpoints: options.endpoints, requested_pairs: options.pairs,
+    requested_websockets: options.pairs * 2 + (options.control ? 1 : 0),
     setup_duration_ms: Math.round(setupDurationMs), steady_duration_ms: Math.round(steadyDurationMs), duration_ms: Math.round(durationMs),
     ...stats, throughput_frames_per_second: Number((stats.frames_received / (durationMs / 1000)).toFixed(2)),
     latency_ms: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), p99: percentile(latencies, 0.99) },
