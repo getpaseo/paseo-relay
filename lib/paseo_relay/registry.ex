@@ -207,7 +207,13 @@ defmodule PaseoRelay.Registry do
   defp opposite(:server), do: :client
   defp opposite(:client), do: :server
   defp deliver(nil, _opcode, _payload), do: :ok
-  defp deliver(pid, opcode, payload), do: send(pid, {:relay_frame, opcode, payload})
+
+  defp deliver(pid, opcode, payload) do
+    PaseoRelay.Metrics.inc(:frames_forwarded)
+    PaseoRelay.Metrics.inc(:bytes_forwarded, byte_size(payload))
+    send(pid, {:relay_frame, opcode, payload})
+  end
+
   defp close(nil, _code, _reason), do: :ok
   defp close(pid, code, reason), do: send(pid, {:relay_close, code, reason})
   defp notify(nil, _message), do: :ok

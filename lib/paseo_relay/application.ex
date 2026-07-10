@@ -7,6 +7,7 @@ defmodule PaseoRelay.Application do
 
     children = [
       {PaseoRelay.Drain, Keyword.fetch!(operations, :drain)},
+      PaseoRelay.Metrics,
       PaseoRelay.Registry,
       {Bandit,
        plug: PaseoRelay.Router,

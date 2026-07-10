@@ -7,10 +7,13 @@ app = "replace-with-your-app"
   PASEO_RELAY_HOST = "0.0.0.0"
   PASEO_RELAY_PORT = "4000"
   PASEO_RELAY_INTERNAL_PORT = "4001"
+  PASEO_RELAY_MIN_CLUSTER_SIZE = "2"
 
 [[services]]
   internal_port = 4000
   protocol = "tcp"
+  auto_stop_machines = "off"
+  min_machines_running = 2
 
   [[services.ports]]
     port = 80
@@ -18,3 +21,9 @@ app = "replace-with-your-app"
   [[services.ports]]
     port = 443
     handlers = ["tls"]
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "2s"
+    method = "GET"
+    path = "/ready"

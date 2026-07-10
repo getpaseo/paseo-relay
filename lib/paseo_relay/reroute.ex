@@ -1,9 +1,17 @@
 defmodule PaseoRelay.Reroute do
-  @moduledoc "Transforms a generic ownership decision into configured response headers."
+  @moduledoc false
 
-  def headers({:reroute, target}, header_name) when is_binary(target) and is_binary(header_name),
-    do: %{header_name => target}
+  def headers({:reroute, target}, header) when is_binary(target) and is_binary(header),
+    do: %{header => target}
 
-  def headers(:local, _header_name), do: %{}
-  def headers(:unowned, _header_name), do: %{}
+  def headers(_, _header), do: %{}
+
+  def response(conn, decision) do
+    header = Application.fetch_env!(:paseo_relay, :reroute_header)
+
+    Enum.reduce(headers(decision, header), conn, fn {name, value}, conn ->
+      Plug.Conn.put_resp_header(conn, name, value)
+    end)
+    |> Plug.Conn.send_resp(409, "")
+  end
 end

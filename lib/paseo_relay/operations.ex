@@ -17,7 +17,7 @@ defmodule PaseoRelay.Operations do
   end
 
   get "/ready" do
-    if draining?(conn) do
+    if draining?(conn) or not PaseoRelay.Ownership.ready?() do
       send_json(conn, 503, "draining")
     else
       send_json(conn, 200, "ready")
@@ -32,7 +32,8 @@ defmodule PaseoRelay.Operations do
         "paseo_relay_ready #{if(draining?(conn), do: 0, else: 1)}",
         "# HELP paseo_relay_draining Whether this node is draining.",
         "# TYPE paseo_relay_draining gauge",
-        "paseo_relay_draining #{if(draining?(conn), do: 1, else: 0)}"
+        "paseo_relay_draining #{if(draining?(conn), do: 1, else: 0)}",
+        PaseoRelay.Metrics.render()
       ]
       |> Enum.join("\n")
       |> Kernel.<>("\n")
