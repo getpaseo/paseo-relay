@@ -1,4 +1,4 @@
 import Config
 
 config :paseo_relay,
-  operations: [port: 4000, drain: false]
+  operations: [host: "127.0.0.1", ip: {127, 0, 0, 1}, port: 4000, drain: false]

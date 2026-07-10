@@ -14,7 +14,7 @@ defmodule PaseoRelay.ConfigTest do
                 drain: false,
                 node_name: nil,
                 cookie: nil
-             }}
+              }}
   end
 
   test "rejects a listener hostname that the socket layer cannot bind" do
