@@ -1,4 +1,4 @@
-FROM hexpm/elixir:1.20.2-erlang-29.0.3-debian-bookworm-20260126 AS build
+FROM hexpm/elixir:1.20.2-erlang-29.0.2-debian-bookworm-20260623-slim AS build
 WORKDIR /app
 ENV MIX_ENV=prod
 COPY mix.exs mix.lock ./
