@@ -1,20 +1,18 @@
 defmodule PaseoRelay.Application do
-  # See https://hexdocs.pm/elixir/Application.html
-  # for more information on OTP Applications
-  @moduledoc false
-
   use Application
 
   @impl true
   def start(_type, _args) do
+    port = Application.get_env(:paseo_relay, :port, 4000)
+
     children = [
-      # Starts a worker by calling: PaseoRelay.Worker.start_link(arg)
-      # {PaseoRelay.Worker, arg}
+      PaseoRelay.Registry,
+      {Bandit,
+       plug: PaseoRelay.Router,
+       port: port,
+       websocket_options: [max_frame_size: 32 * 1024 * 1024, compress: false]}
     ]
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: PaseoRelay.Supervisor]
-    Supervisor.start_link(children, opts)
+    Supervisor.start_link(children, strategy: :one_for_one, name: PaseoRelay.Supervisor)
   end
 end
