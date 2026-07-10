@@ -40,6 +40,9 @@ or below the configured cluster floor. `GET /metrics` is Prometheus text and
 exposes readiness, draining, active WebSockets, active sessions, reroutes,
 forwarded frames, and forwarded bytes for the local node.
 
+See [`OPERATIONS.md`](OPERATIONS.md) for the production failure model,
+capacity policy, and alerting signals.
+
 Build a production release with `MIX_ENV=prod asdf exec mix release`, or build
 the generic container with `docker build -t paseo-relay .`. The explicit
 provider adapter in [`deployment/fly`](deployment/fly) translates its platform

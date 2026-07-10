@@ -77,9 +77,9 @@ defmodule PaseoRelay.RouterIntegrationTest do
 
     assert metric_value(metrics, "active_websockets") == before.active_websockets + 1
     assert metric_value(metrics, "active_sessions") == before.active_sessions + 1
-    assert metric_value(metrics, "reroute_responses") == before.reroute_responses
-    assert metric_value(metrics, "frames_forwarded") == before.frames_forwarded
-    assert metric_value(metrics, "bytes_forwarded") == before.bytes_forwarded
+    assert metric_value(metrics, "reroute_responses_total") == before.reroute_responses
+    assert metric_value(metrics, "frames_forwarded_total") == before.frames_forwarded
+    assert metric_value(metrics, "bytes_forwarded_total") == before.bytes_forwarded
     :gen_tcp.close(socket)
   end
 

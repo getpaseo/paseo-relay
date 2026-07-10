@@ -23,6 +23,13 @@ defmodule PaseoRelay.OperationsTest do
     metrics = Operations.call(conn(:get, "/metrics"), [])
 
     assert metrics.status == 200
+    assert metrics.resp_body =~ "# TYPE paseo_relay_ready gauge"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_draining gauge"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_active_websockets gauge"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_active_sessions gauge"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_reroute_responses_total counter"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_frames_forwarded_total counter"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_bytes_forwarded_total counter"
     assert metrics.resp_body =~ "paseo_relay_ready 1"
     assert metrics.resp_body =~ "paseo_relay_draining 0"
   end

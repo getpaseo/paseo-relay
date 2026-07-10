@@ -3,13 +3,18 @@ defmodule PaseoRelay.Metrics do
 
   use GenServer
 
-  @names [
-    :active_websockets,
-    :active_sessions,
-    :reroute_responses,
-    :frames_forwarded,
-    :bytes_forwarded
+  @metrics [
+    {:active_websockets, :gauge, "active_websockets", "Open WebSocket connections on this node."},
+    {:active_sessions, :gauge, "active_sessions", "Relay sessions owned by this node."},
+    {:reroute_responses, :counter, "reroute_responses_total",
+     "WebSocket upgrades rerouted to another owner."},
+    {:frames_forwarded, :counter, "frames_forwarded_total",
+     "WebSocket frames forwarded by this node."},
+    {:bytes_forwarded, :counter, "bytes_forwarded_total",
+     "WebSocket payload bytes forwarded by this node."}
   ]
+
+  @names Enum.map(@metrics, &elem(&1, 0))
 
   def start_link(_options), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -22,8 +27,17 @@ defmodule PaseoRelay.Metrics do
   end
 
   def render do
-    snapshot()
-    |> Enum.map_join("\n", fn {name, value} -> "paseo_relay_#{name} #{value}" end)
+    @metrics
+    |> Enum.map_join("\n", fn {name, type, public_name, help} ->
+      full_name = "paseo_relay_#{public_name}"
+
+      [
+        "# HELP #{full_name} #{help}",
+        "# TYPE #{full_name} #{type}",
+        "#{full_name} #{value(name)}"
+      ]
+      |> Enum.join("\n")
+    end)
     |> Kernel.<>("\n")
   end
 

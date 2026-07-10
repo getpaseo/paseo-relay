@@ -28,9 +28,16 @@ When a WebSocket request reaches a non-owner, the generic reroute adapter emits
 `fly-replay: instance=<machine-id>` before WebSocket negotiation. Fly Proxy then
 replays the unchanged upgrade request to the owner.
 
-The entrypoint raises the per-process file descriptor limit to 65,536 by
+The entrypoint raises the per-process file descriptor limit to 100,000 by
 default. Override `PASEO_RELAY_NOFILE` when a deployment needs a different
-ceiling.
+ceiling. Fly Proxy starts an existing stopped Machine when every running
+Machine in the selected region is above the 10,000-connection soft limit.
+It refuses new connections to a Machine at the 50,000-connection hard limit.
+Fly does not create Machines, so provision stopped spares explicitly.
+
+Fly scrapes `/metrics` into its managed Prometheus service. The custom relay
+series appear in Fly's managed Grafana alongside its built-in Machine, proxy,
+memory, CPU, network, and file-descriptor metrics.
 
 Useful checks:
 

@@ -14,14 +14,13 @@ kill_timeout = "30s"
 [http_service]
   internal_port = 4000
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = "off"
   auto_start_machines = true
-  min_machines_running = 2
 
   [http_service.concurrency]
     type = "connections"
-    soft_limit = 40000
-    hard_limit = 60000
+    soft_limit = 10000
+    hard_limit = 50000
 
   [[http_service.checks]]
     interval = "10s"
@@ -29,6 +28,10 @@ kill_timeout = "30s"
     grace_period = "15s"
     method = "GET"
     path = "/ready"
+
+[metrics]
+  port = 4000
+  path = "/metrics"
 
 [deploy]
   strategy = "rolling"
