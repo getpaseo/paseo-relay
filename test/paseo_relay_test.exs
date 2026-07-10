@@ -104,4 +104,31 @@ defmodule PaseoRelay.DistributedOwnershipTest do
     assert :local = Ownership.claim("server-d", "opaque-owner-a")
     assert {:reroute, "opaque-owner-a"} = :rpc.call(peer, Ownership, :resolve, ["server-d"])
   end
+
+  test "a remote node can claim after the current owner dies", %{peer: peer} do
+    parent = self()
+
+    local_session =
+      spawn(fn ->
+        assert :local = Ownership.claim("server-e", "opaque-owner-a")
+        send(parent, :claimed)
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert_receive :claimed
+    owner_record = Ownership.owner_pid("server-e")
+    owner_down = Process.monitor(owner_record)
+    Process.exit(local_session, :kill)
+    assert_receive {:DOWN, ^owner_down, :process, ^owner_record, :normal}
+
+    remote_session = :rpc.call(peer, :erlang, :spawn, [:timer, :sleep, [:infinity]])
+
+    assert :local =
+             :rpc.call(peer, Ownership, :claim, ["server-e", "opaque-owner-b", remote_session])
+
+    assert {:reroute, "opaque-owner-b"} = Ownership.resolve("server-e")
+  end
 end
