@@ -48,14 +48,15 @@ The executable client uses actual WebSockets and the deployed v2 query contract:
 `serverId`, `role`, optional `connectionId`, and `v=2`. It opens matching
 server-data and client roles, so it can measure bidirectional traffic without
 importing relay code. It prints one JSON object containing connection success and
-failure counts, frame throughput, p50/p95/p99 latency, duration, client RSS/CPU,
+failure counts, requested pairs and WebSockets, setup and steady durations, frame
+throughput, p50/p95/p99 latency, duration, client RSS/CPU,
 and optional relay RSS/CPU (`--relay-pid`).
 
 Safe local smoke test:
 
 ```sh
-node scripts/relay-load.mjs --scenario idle --connections 10 --duration 10
-node scripts/relay-load.mjs --scenario sustained --connections 10 --rate 10 --duration 10
+node scripts/relay-load.mjs --scenario idle --pairs 10 --duration 10
+node scripts/relay-load.mjs --scenario sustained --pairs 10 --rate 10 --duration 10
 ```
 
 Two-node localhost test (after starting relays on ports 4000 and 4002):
@@ -69,12 +70,13 @@ budget. Example high-load commands, deliberately not defaults:
 
 ```sh
 ulimit -n 120000
-node scripts/relay-load.mjs --scenario idle --connections 50000 --duration 300 --relay-pid "$RELAY_PID"
-node scripts/relay-load.mjs --scenario sustained --connections 1000 --rate 5 --duration 300 --relay-pid "$RELAY_PID"
-node scripts/relay-load.mjs --scenario reconnect --connections 1000 --reconnects 20 --duration 10
+node scripts/relay-load.mjs --scenario idle --pairs 25000 --batch-size 250 --ramp-ms 100 --duration 300 --relay-pid "$RELAY_PID"
+node scripts/relay-load.mjs --scenario sustained --pairs 1000 --batch-size 250 --ramp-ms 100 --rate 5 --duration 300 --relay-pid "$RELAY_PID"
+node scripts/relay-load.mjs --scenario reconnect --pairs 1000 --batch-size 250 --ramp-ms 100 --reconnects 20 --duration 10
 ```
 
 The sustained example sends in both directions: 1,000 pairs × 5 ticks/s × 2
-frames = 10,000 frames/s. The current bootstrap does not yet implement v2 relay
-routing, so load commands are expected to report connection/frame failures until
-the protocol/routing branch is wired in.
+frames = 10,000 frames/s. The 50,000-socket target is 25,000 pairs plus one
+control socket. `--batch-size` bounds concurrent opens; `--ramp-ms` spaces each
+batch. `--duration` measures steady traffic only, while JSON reports setup and
+steady durations separately.

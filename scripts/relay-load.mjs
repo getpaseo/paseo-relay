@@ -11,7 +11,10 @@ const usage = `Usage: node scripts/relay-load.mjs [options]
 
   --endpoints <ws-url,...>  Relay /ws endpoint(s); two values exercise two nodes.
   --server-id <id>          v2 serverId (default: load-server)
-  --connections <n>         Paired client/server data sockets (default: 10)
+  --pairs <n>               Paired client/server data sockets (default: 10)
+  --connections <n>         Backward-compatible alias for --pairs
+  --batch-size <n>          Maximum pairs opened concurrently (default: 100)
+  --ramp-ms <milliseconds>  Delay between opening batches (default: 0)
   --scenario <name>         idle, sustained, burst, or reconnect (default: idle)
   --duration <seconds>      Measurement duration (default: 10)
   --rate <messages/s>       Bidirectional sustained rate (default: 10)
@@ -36,6 +39,13 @@ function args(argv) {
     if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative number`);
     return parsed;
   };
+  const integer = (name, fallback, minimum = 0) => {
+    const parsed = number(name, fallback);
+    if (!Number.isInteger(parsed) || parsed < minimum) {
+      throw new Error(`${name} must be an integer greater than or equal to ${minimum}`);
+    }
+    return parsed;
+  };
   const endpoints = String(value("--endpoints", "ws://127.0.0.1:4000/ws"))
     .split(",").map((endpoint) => endpoint.trim()).filter(Boolean);
   if (!endpoints.length) throw new Error("--endpoints needs at least one WebSocket URL");
@@ -45,8 +55,10 @@ function args(argv) {
   }
   return {
     endpoints, serverId: value("--server-id", "load-server"), scenario,
-    connections: number("--connections", 10), durationMs: number("--duration", 10) * 1000,
-    rate: number("--rate", 10), burst: number("--burst", 0), reconnects: number("--reconnects", 3),
+    pairs: argv.includes("--pairs") ? integer("--pairs", 10) : integer("--connections", 10),
+    batchSize: integer("--batch-size", 100, 1), rampMs: number("--ramp-ms", 0),
+    durationMs: number("--duration", 10) * 1000, rate: number("--rate", 10),
+    burst: number("--burst", 0), reconnects: integer("--reconnects", 3),
     payloadBytes: Math.max(32, number("--payload-bytes", 128)), relayPid: value("--relay-pid", null),
   };
 }
@@ -66,19 +78,32 @@ function endpoint(url, query) {
 }
 
 function open(url, stats) {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
-    let opened = false;
+  let socket;
+  const opening = new Promise((resolve, reject) => {
+    socket = new WebSocket(url);
+    const state = { opened: false, finalizing: false, closed: false };
+    socket.loadState = state;
     let failed = false;
     const fail = () => {
       if (!failed) stats.connection_failures += 1;
       failed = true;
     };
-    const timeout = setTimeout(() => reject(new Error("WebSocket open timed out")), 10_000);
-    socket.addEventListener("open", () => { opened = true; clearTimeout(timeout); stats.connection_successes += 1; resolve(socket); }, { once: true });
-    socket.addEventListener("error", () => { fail(); if (!opened) { clearTimeout(timeout); reject(new Error("WebSocket connection failed")); } }, { once: true });
-    socket.addEventListener("close", (event) => { if (event.code !== 1000) fail(); });
+    const timeout = setTimeout(() => {
+      fail();
+      socket.close();
+      reject(new Error("WebSocket open timed out"));
+    }, 10_000);
+    state.waitForClose = new Promise((resolveClose) => { state.resolveClose = resolveClose; });
+    socket.addEventListener("open", () => { state.opened = true; clearTimeout(timeout); stats.connection_successes += 1; resolve(socket); }, { once: true });
+    socket.addEventListener("error", () => { fail(); if (!state.opened) { clearTimeout(timeout); reject(new Error("WebSocket connection failed")); } }, { once: true });
+    socket.addEventListener("close", (event) => {
+      state.closed = true;
+      state.resolveClose();
+      if (event.code !== 1000 && !(state.finalizing && [1001, 1005, 1012].includes(event.code))) fail();
+    });
   });
+  opening.socket = socket;
+  return opening;
 }
 
 async function connectPair(options, index, stats, latencies) {
@@ -87,10 +112,18 @@ async function connectPair(options, index, stats, latencies) {
   const clientIndex = Number(String(index).split("-").at(-1));
   const clientEndpoint = options.endpoints[(clientIndex + 1) % options.endpoints.length];
   const shared = { serverId: options.serverId, connectionId, v: "2" };
-  const [server, client] = await Promise.all([
+  const openings = [
     open(endpoint(serverEndpoint, { ...shared, role: "server" }), stats),
     open(endpoint(clientEndpoint, { ...shared, role: "client" }), stats),
-  ]);
+  ];
+  let server;
+  let client;
+  try {
+    [server, client] = await Promise.all(openings);
+  } catch (error) {
+    await finish(openings.map((opening) => opening.socket), stats);
+    throw error;
+  }
   for (const socket of [server, client]) {
     socket.addEventListener("message", (event) => {
       stats.frames_received += 1;
@@ -100,6 +133,31 @@ async function connectPair(options, index, stats, latencies) {
     });
   }
   return { server, client };
+}
+
+async function connectPairs(options, wave, stats, latencies) {
+  const pairs = [];
+  for (let first = 0; first < options.pairs; first += options.batchSize) {
+    const size = Math.min(options.batchSize, options.pairs - first);
+    pairs.push(...await Promise.all(Array.from({ length: size }, (_, offset) =>
+      connectPair(options, `${wave}-${first + offset}`, stats, latencies))));
+    if (first + size < options.pairs && options.rampMs) await sleep(options.rampMs);
+  }
+  return pairs;
+}
+
+async function finish(sockets, stats) {
+  const openSockets = sockets.filter((socket) => socket.loadState?.opened && !socket.loadState.closed);
+  openSockets.forEach((socket) => { socket.loadState.finalizing = true; });
+  openSockets.forEach((socket) => socket.close(1000, "load complete"));
+  const completed = Promise.all(openSockets.map((socket) => socket.loadState.waitForClose));
+  let timeout;
+  const expired = new Promise((resolve) => { timeout = setTimeout(() => resolve(true), 5_000); });
+  const result = await Promise.race([completed.then(() => false), expired]);
+  clearTimeout(timeout);
+  if (result) {
+    stats.connection_failures += openSockets.filter((socket) => !socket.loadState.closed).length;
+  }
 }
 
 function send(socket, payload, stats) {
@@ -124,15 +182,19 @@ async function main() {
   const stats = { connection_successes: 0, connection_failures: 0, send_failures: 0, frames_sent: 0, frames_received: 0, bytes_sent: 0, bytes_received: 0 };
   const latencies = [];
   const started = now();
+  let setupDurationMs = 0;
+  let steadyDurationMs = 0;
   let pairs = [];
   let control;
   try {
     control = await open(endpoint(options.endpoints[0], { serverId: options.serverId, role: "server", v: "2" }), stats);
     const waves = options.scenario === "reconnect" ? options.reconnects + 1 : 1;
     for (let wave = 0; wave < waves; wave += 1) {
-      pairs = await Promise.all(Array.from({ length: options.connections }, (_, index) => connectPair(options, `${wave}-${index}`, stats, latencies)));
+      pairs = await connectPairs(options, wave, stats, latencies);
       if (wave < waves - 1) { pairs.flatMap(Object.values).forEach((socket) => socket.close(1000, "load reconnect")); await sleep(100); }
     }
+    setupDurationMs = now() - started;
+    const steadyStarted = now();
     const payload = (direction) => `${Date.now()}:${direction}:${"x".repeat(options.payloadBytes)}`;
     const publish = () => pairs.forEach(({ server, client }) => { send(client, payload("client"), stats); send(server, payload("server"), stats); });
     if (options.scenario === "burst" || options.burst) for (let i = 0; i < Math.max(1, options.burst); i += 1) publish();
@@ -144,20 +206,20 @@ async function main() {
     } else {
       await sleep(options.durationMs);
     }
+    steadyDurationMs = now() - steadyStarted;
   } catch (error) {
     stats.connection_failures += 1;
     stats.error = error.message;
   } finally {
-    control?.close(1000, "load complete");
-    pairs.flatMap(Object.values).forEach((socket) => socket.close(1000, "load complete"));
-    await sleep(50);
+    await finish([...pairs.flatMap(Object.values), ...(control ? [control] : [])], stats);
   }
   const durationMs = now() - started;
   const resource = process.resourceUsage();
   const relay = sampleRelay(options.relayPid);
   process.stdout.write(`${JSON.stringify({
     protocol: { version: 2, roles: ["server-data", "client"] }, scenario: options.scenario,
-    endpoints: options.endpoints, requested_connections: options.connections, duration_ms: Math.round(durationMs),
+    endpoints: options.endpoints, requested_pairs: options.pairs, requested_websockets: options.pairs * 2 + 1,
+    setup_duration_ms: Math.round(setupDurationMs), steady_duration_ms: Math.round(steadyDurationMs), duration_ms: Math.round(durationMs),
     ...stats, throughput_frames_per_second: Number((stats.frames_received / (durationMs / 1000)).toFixed(2)),
     latency_ms: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), p99: percentile(latencies, 0.99) },
     client: { rss_bytes: process.memoryUsage().rss, cpu_microseconds: resource.userCPUTime + resource.systemCPUTime }, relay,
