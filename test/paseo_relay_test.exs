@@ -32,6 +32,17 @@ defmodule PaseoRelay.OwnershipTest do
   end
 end
 
+defmodule PaseoRelay.RerouteTest do
+  use ExUnit.Case, async: true
+
+  test "renders an opaque reroute target into a configured response header" do
+    assert %{"x-reroute-target" => "machine-opaque-id"} =
+             PaseoRelay.Reroute.headers({:reroute, "machine-opaque-id"}, "x-reroute-target")
+
+    assert %{} = PaseoRelay.Reroute.headers(:local, "x-reroute-target")
+  end
+end
+
 defmodule PaseoRelay.DistributedOwnershipTest do
   use ExUnit.Case
 
