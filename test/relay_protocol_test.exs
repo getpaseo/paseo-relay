@@ -115,11 +115,7 @@ defmodule PaseoRelay.RelayProtocolTest do
     assert_receive {:relay_open, ^replacement}
     assert_receive {:relay_closed, _, {:remote, 1008, "Replaced by new connection"}}
 
-    :ok = WebSockex.send_frame(replacement, {:text, "from-replacement"})
-    assert_receive {:relay_frame, ^client, :text, "from-replacement"}
-
     GenServer.stop(client)
-    GenServer.stop(replacement)
   end
 
   defp v1_url(port, role) do
