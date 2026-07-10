@@ -23,6 +23,7 @@ const usage = `Usage: node scripts/relay-load.mjs [options]
   --burst <n>               Bidirectional messages sent once after connection
   --reconnects <n>          Reconnection waves for reconnect scenario (default: 3)
   --payload-bytes <n>       Frame size target (default: 128)
+  --keepalive <seconds>     Send a small frame on every socket at this interval
   --relay-pid <pid>         Sample this relay process's RSS and CPU with ps
   --json                    Print one machine-readable JSON result (default)
 
@@ -63,6 +64,7 @@ function args(argv) {
     batchSize: integer("--batch-size", 100, 1), rampMs: number("--ramp-ms", 0),
     durationMs: number("--duration", 10) * 1000, rate: number("--rate", 10),
     burst: number("--burst", 0), reconnects: integer("--reconnects", 3),
+    keepaliveMs: number("--keepalive", 0) * 1000,
     payloadBytes: Math.max(32, number("--payload-bytes", 128)), relayPid: value("--relay-pid", null),
   };
 }
@@ -81,7 +83,7 @@ function endpoint(url, query) {
   return parsed.toString();
 }
 
-function open(url, stats) {
+function open(url, stats, keepaliveMs) {
   let socket;
   const opening = new Promise((resolve, reject) => {
     socket = new WebSocket(url);
@@ -98,7 +100,23 @@ function open(url, stats) {
       reject(new Error("WebSocket open timed out"));
     }, 10_000);
     state.waitForClose = new Promise((resolveClose) => { state.resolveClose = resolveClose; });
-    socket.addEventListener("open", () => { state.opened = true; clearTimeout(timeout); stats.connection_successes += 1; resolve(socket); }, { once: true });
+    socket.addEventListener("open", () => {
+      state.opened = true;
+      clearTimeout(timeout);
+      stats.connection_successes += 1;
+      if (keepaliveMs > 0) {
+        state.keepalive = setInterval(() => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          try {
+            socket.send("load-keepalive");
+            stats.keepalive_frames_sent += 1;
+          } catch {
+            stats.send_failures += 1;
+          }
+        }, keepaliveMs);
+      }
+      resolve(socket);
+    }, { once: true });
     socket.addEventListener("error", (event) => {
       fail();
       if (!state.opened) {
@@ -108,6 +126,7 @@ function open(url, stats) {
     }, { once: true });
     socket.addEventListener("close", (event) => {
       state.closed = true;
+      clearInterval(state.keepalive);
       state.resolveClose();
       if (event.code !== 1000 && !(state.finalizing && [1001, 1005, 1012].includes(event.code))) fail();
     });
@@ -123,8 +142,8 @@ async function connectPair(options, index, stats, latencies) {
   const clientEndpoint = options.endpoints[(clientIndex + 1) % options.endpoints.length];
   const shared = { serverId: options.serverId, connectionId, v: "2" };
   const openings = [
-    open(endpoint(serverEndpoint, { ...shared, role: "server" }), stats),
-    open(endpoint(clientEndpoint, { ...shared, role: "client" }), stats),
+    open(endpoint(serverEndpoint, { ...shared, role: "server" }), stats, options.keepaliveMs),
+    open(endpoint(clientEndpoint, { ...shared, role: "client" }), stats, options.keepaliveMs),
   ];
   let server;
   let client;
@@ -163,6 +182,7 @@ async function connectPairs(options, wave, stats, latencies) {
 }
 
 async function finish(sockets, stats) {
+  sockets.forEach((socket) => clearInterval(socket.loadState?.keepalive));
   const openSockets = sockets.filter((socket) => socket.loadState?.opened && !socket.loadState.closed);
   openSockets.forEach((socket) => { socket.loadState.finalizing = true; });
   openSockets.forEach((socket) => socket.close(1000, "load complete"));
@@ -195,7 +215,7 @@ async function main() {
   let options;
   try { options = args(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exitCode = 2; return; }
   if (options.help) { process.stdout.write(usage); return; }
-  const stats = { connection_successes: 0, connection_failures: 0, send_failures: 0, frames_sent: 0, frames_received: 0, bytes_sent: 0, bytes_received: 0 };
+  const stats = { connection_successes: 0, connection_failures: 0, send_failures: 0, keepalive_frames_sent: 0, frames_sent: 0, frames_received: 0, bytes_sent: 0, bytes_received: 0 };
   const latencies = [];
   const started = now();
   let setupDurationMs = 0;
@@ -204,7 +224,7 @@ async function main() {
   let control;
   try {
     if (options.control) {
-      control = await open(endpoint(options.endpoints[0], { serverId: options.serverId, role: "server", v: "2" }), stats);
+      control = await open(endpoint(options.endpoints[0], { serverId: options.serverId, role: "server", v: "2" }), stats, options.keepaliveMs);
     }
     const waves = options.scenario === "reconnect" ? options.reconnects + 1 : 1;
     for (let wave = 0; wave < waves; wave += 1) {

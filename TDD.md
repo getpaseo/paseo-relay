@@ -31,3 +31,5 @@
 
 - Red: a real black-box run requesting `--no-control` still opened five WebSockets for two pairs because every load process unconditionally opened its own daemon control socket.
 - Green: sharded runs can omit that single shared socket and use an explicit connection-ID prefix. A real Bandit/WebSocket test verifies four data sockets, bidirectional frames, and clean shutdown without importing relay internals.
+- Red: the same real-server test had no keepalive accounting when a keepalive interval was requested.
+- Green: every open test socket can now send a small, separately-counted keepalive frame during long ramps; timers are cleared on close and finalization.

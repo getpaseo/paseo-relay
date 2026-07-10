@@ -93,3 +93,12 @@ To distribute a run across load generators, open the daemon control socket on
 one generator and pass `--no-control` to the others. Give every generator a
 different `--connection-prefix`; they can then share one `--server-id` without
 connection ID collisions, exercising a single relay owner through reroutes.
+Use `--keepalive 20` when a slow distributed ramp would otherwise let early
+idle sockets reach the relay's 60-second liveness timeout.
+
+A disposable load-generator image is available without any deployment-provider
+assumptions:
+
+```sh
+docker build -f deployment/load/Dockerfile -t paseo-relay-load .
+```

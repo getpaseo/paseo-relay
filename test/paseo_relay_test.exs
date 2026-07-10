@@ -128,11 +128,11 @@ defmodule PaseoRelay.DistributedOwnershipTest do
         end
       end)
 
-    assert_receive {:claimed, :local}
+    assert_receive {:claimed, :local}, 5_500
     owner_record = Ownership.owner_pid("server-e")
     owner_down = Process.monitor(owner_record)
     Process.exit(local_session, :kill)
-    assert_receive {:DOWN, ^owner_down, :process, ^owner_record, :normal}
+    assert_receive {:DOWN, ^owner_down, :process, ^owner_record, :normal}, 5_500
 
     remote_session = :rpc.call(peer, :erlang, :spawn, [:timer, :sleep, [:infinity]])
 

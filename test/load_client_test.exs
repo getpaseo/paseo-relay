@@ -89,6 +89,8 @@ defmodule PaseoRelay.LoadClientTest do
         "burst",
         "--burst",
         "1",
+        "--keepalive",
+        "0.05",
         "--duration",
         "0.2"
       ])
@@ -98,7 +100,9 @@ defmodule PaseoRelay.LoadClientTest do
     assert status == 0
     assert result["requested_websockets"] == 4
     assert result["connection_successes"] == 4
-    assert result["frames_received"] == 4
+    assert result["frames_received"] >= 4
+    assert is_integer(result["keepalive_frames_sent"])
+    assert result["keepalive_frames_sent"] > 0
     assert result["connection_failures"] == 0
   end
 
