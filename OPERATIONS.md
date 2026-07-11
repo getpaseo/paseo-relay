@@ -1,5 +1,37 @@
 # Operating Paseo Relay
 
+## The bar
+
+The relay is critical infrastructure. People run their entire working day
+through it — agents, terminals, mobile sessions — and a blip of even a few
+seconds is user-visible. A stuck node is a broken workday for everyone whose
+sessions it owns. Treat every production action — deploys, restarts,
+diagnostics, config changes — as something users will feel, and never stack
+two of them (a diagnostic during a reconnect surge, a deploy during a
+migration) without deciding that the combination is safe. When in doubt,
+don't touch production.
+
+## Diagnostics discipline
+
+Every recurring observability question must be answerable from `/metrics`,
+logs, or a new low-cardinality metric — never by interrogating live
+processes.
+
+- **Never call `:sys.get_state/1` (or any full-state dump) on the production
+  Registry or any singleton process.** Copying a large state term blocks the
+  process for the duration of the copy. This has wedged a production node:
+  full-state dumps issued while a reconnect surge was in flight saturated the
+  Registry mailbox, WebSocket attaches timed out and failed closed, the VM
+  degraded until its health check went critical, and the Machine had to be
+  restarted. The Registry serializes every frame on its node; seconds of
+  blocking are an outage.
+- Targeted RPC reads during an incident are acceptable: `:syn.lookup/2` for a
+  single key, one counter, one small map. Full-table or full-state scans are
+  not, and the busiest node during a surge is the worst possible target.
+- If a question keeps coming up (sessions by role, ownership counts, orphan
+  sessions), add a gauge to `PaseoRelay.Metrics` and read it from `/metrics`
+  like everything else.
+
 ## Capacity model
 
 The production topology keeps one Machine running in each region and one
@@ -53,6 +85,24 @@ existing client reconnect policy provide backpressure.
   `PaseoRelay.Drain`; there is no drain HTTP endpoint. Fly's deployment
   lifecycle does not activate this state, so it does not protect ownership
   during `fly deploy`.
+- **A node wedges but stays clustered — the worst failure mode.** If a node
+  stops answering HTTP (health check critical, `/metrics` unresponsive) while
+  its BEAM stays connected to the cluster, Syn keeps its ownership
+  registrations alive: reconnecting daemons are rerouted into the wedged node
+  and cannot re-home elsewhere. Every session it owned is held hostage until
+  the node dies. Remedy: restart the Machine promptly — the restart drops the
+  node from the cluster, purges its registrations, and stranded sessions
+  re-claim on healthy nodes within seconds. Do not wait for a wedged node to
+  recover on its own, and do not diagnose it with anything heavier than its
+  logs. Planned follow-up: an in-VM watchdog that self-terminates the node
+  when its own readiness or Registry call latency degrades, so this recovery
+  does not require an operator.
+- **An upstream proxy sits in front of the relay (e.g. during a migration):**
+  the proxy has its own connection lifecycle. Its deploys can sever a large
+  and unpredictable fraction of relay connections at once, and its code
+  propagation windows can strand clients on the old path. Treat any upstream
+  deploy as a fleet reconnect storm: schedule it deliberately, never stack it
+  with other production actions, and verify session convergence afterward.
 - **The BEAM cluster partitions:** ownership uses Syn's available, strongly
   eventually consistent registry rather than a quorum or shared store. Each side
   can admit an owner for the same `serverId` while disconnected. When the
