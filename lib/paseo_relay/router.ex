@@ -42,10 +42,9 @@ defmodule PaseoRelay.Router do
   defp target, do: Application.fetch_env!(:paseo_relay, :ownership_target)
 
   defp require_websocket_upgrade(conn) do
-    if Enum.any?(get_req_header(conn, "upgrade"), &(String.downcase(&1) == "websocket")) do
-      :ok
-    else
-      {:upgrade_required, "Expected WebSocket upgrade"}
+    case WebSockAdapter.UpgradeValidation.validate_upgrade(conn) do
+      :ok -> :ok
+      {:error, _reason} -> {:upgrade_required, "Expected WebSocket upgrade"}
     end
   end
 end

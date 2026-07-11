@@ -33,3 +33,54 @@
 - Green: sharded runs can omit that single shared socket and use an explicit connection-ID prefix. A real Bandit/WebSocket test verifies four data sockets, bidirectional frames, and clean shutdown without importing relay internals.
 - Red: the same real-server test had no keepalive accounting when a keepalive interval was requested.
 - Green: every open test socket can now send a small, separately-counted keepalive frame during long ramps; timers are cleared on close and finalization.
+
+## Relay parity hardening (`6dbe13c`)
+
+### Reject invalid upgrades before ownership
+
+- Red: `mix test test/paseo_relay/router_integration_test.exs:18` sent a plain
+  `GET /ws` request and received `500 Internal Server Error` from
+  `WebSockAdapter.UpgradeError` after `Ownership.route/2` had run.
+- Green: the same real TCP request receives `426 Expected WebSocket upgrade`
+  and `Ownership.owner_pid/1` returns `:undefined`.
+
+### Legacy JSON control keepalive
+
+- Red: `mix test test/relay_protocol_test.exs:77` sent `{"type":"ping"}` on a
+  real v2 control WebSocket and timed out waiting for a response.
+- Green: the same socket receives a JSON object with `type: "pong"` and an
+  integer timestamp.
+
+### Stuck control recovery
+
+- Red: `mix test test/relay_protocol_test.exs:94` connected a client without a
+  matching server-data socket; after 11 seconds, control had received no sync
+  nudge.
+- Green: control receives the current `sync` list at 10 seconds and, when data
+  is still absent at 15 seconds, closes with `1011 Control unresponsive`.
+
+### Registry crash fail-closed behavior
+
+- Red: after a verified client-to-data frame, killing the registered Registry
+  left the real client WebSocket open past one second.
+- Green: each socket monitors the Registry process that attached it; the same
+  process-level crash closes client and data WebSockets with
+  `1012 Registry unavailable`.
+
+### No relay idle disconnect
+
+- Red: the real idle-WebSocket regression ran against the adapter's inherited
+  60-second timeout and closed before its 61-second assertion completed.
+- Green: the route passes `timeout: nil`; the same real socket remains open
+  past 61 seconds.
+
+## Complete malformed-handshake validation
+
+- Red: `mix test test/paseo_relay/router_integration_test.exs:28` sent
+  `Upgrade: websocket` without `Connection: Upgrade`. The adapter raised
+  `WebSockAdapter.UpgradeError` after routing, returned `500`, and
+  `Ownership.owner_pid/1` was a live PID.
+- Green: the router now runs
+  `WebSockAdapter.UpgradeValidation.validate_upgrade/1` before
+  `Ownership.route/2`; the same real TCP request returns `426` and ownership
+  remains `:undefined`.

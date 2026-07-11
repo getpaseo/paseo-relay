@@ -24,6 +24,22 @@ defmodule PaseoRelay.RouterIntegrationTest do
     assert :undefined == PaseoRelay.Ownership.owner_pid(server_id)
   end
 
+  test "an incomplete websocket handshake is rejected before it claims session ownership", %{
+    port: port
+  } do
+    server_id = "srv_incomplete_#{System.unique_integer([:positive])}"
+
+    response =
+      request(
+        port,
+        "/ws?serverId=#{server_id}&role=client&v=2",
+        ["Upgrade: websocket\r\n"]
+      )
+
+    assert :undefined == PaseoRelay.Ownership.owner_pid(server_id)
+    assert "HTTP/1.1 426" <> _ = response
+  end
+
   test "oversized route identifiers are rejected before they can claim ownership", %{port: port} do
     server_id = String.duplicate("s", 257)
 
