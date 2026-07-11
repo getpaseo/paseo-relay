@@ -74,6 +74,77 @@ defmodule PaseoRelay.RelayProtocolTest do
     GenServer.stop(client)
   end
 
+  test "v2 control answers the legacy JSON ping with a JSON pong" do
+    port = available_port()
+    {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
+    Process.unlink(relay)
+    on_exit(fn -> Process.exit(relay, :shutdown) end)
+
+    {:ok, control} = connect(v2_url(port, "server"))
+    assert_receive {:relay_open, ^control}
+    assert_control(control, %{"type" => "sync", "connectionIds" => []})
+
+    :ok = WebSockex.send_frame(control, {:text, ~s({"type":"ping"})})
+
+    assert_control_type(control, "pong")
+
+    GenServer.stop(control)
+  end
+
+  test "v2 resets an unresponsive control after nudging it to attach client data" do
+    port = available_port()
+    {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
+    Process.unlink(relay)
+    on_exit(fn -> Process.exit(relay, :shutdown) end)
+
+    {:ok, control} = connect(v2_url(port, "server"))
+    assert_receive {:relay_open, ^control}
+    assert_control(control, %{"type" => "sync", "connectionIds" => []})
+
+    {:ok, client} = connect(v2_url(port, "client", "clt_watchdog"))
+    assert_receive {:relay_open, ^client}
+    assert_control(control, %{"type" => "connected", "connectionId" => "clt_watchdog"})
+    assert_control(control, %{"type" => "sync", "connectionIds" => ["clt_watchdog"]}, 11_000)
+    assert_receive {:relay_closed, ^control, {:remote, 1011, "Control unresponsive"}}, 6_000
+
+    GenServer.stop(client)
+  end
+
+  test "v2 sockets fail closed when the registry crashes" do
+    port = available_port()
+    {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
+    Process.unlink(relay)
+    on_exit(fn -> Process.exit(relay, :shutdown) end)
+
+    {:ok, client} = connect(v2_url(port, "client", "clt_registry_crash"))
+    assert_receive {:relay_open, ^client}
+
+    {:ok, data} = connect(v2_url(port, "server", "clt_registry_crash"))
+    assert_receive {:relay_open, ^data}
+
+    :ok = WebSockex.send_frame(client, {:text, "before-registry-crash"})
+    assert_receive {:relay_frame, ^data, :text, "before-registry-crash"}
+
+    Process.exit(Process.whereis(PaseoRelay.Registry), :kill)
+
+    assert_receive {:relay_closed, ^client, {:remote, 1012, "Registry unavailable"}}, 1_000
+    assert_receive {:relay_closed, ^data, {:remote, 1012, "Registry unavailable"}}, 1_000
+  end
+
+  test "an idle websocket remains open past the adapter default timeout" do
+    port = available_port()
+    {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
+    Process.unlink(relay)
+    on_exit(fn -> Process.exit(relay, :shutdown) end)
+
+    {:ok, socket} = connect(v1_url(port, "server"))
+    assert_receive {:relay_open, ^socket}
+
+    refute_receive {:relay_closed, ^socket, _}, 61_000
+
+    GenServer.stop(socket)
+  end
+
   test "v2 closes data with the last client and tells control it disconnected" do
     port = available_port()
     {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
@@ -140,8 +211,14 @@ defmodule PaseoRelay.RelayProtocolTest do
     port
   end
 
-  defp assert_control(client, message) do
-    assert_receive {:relay_frame, ^client, :text, payload}
+  defp assert_control(client, message, timeout \\ 100) do
+    assert_receive {:relay_frame, ^client, :text, payload}, timeout
     assert Jason.decode!(payload) == message
+  end
+
+  defp assert_control_type(client, type) do
+    assert_receive {:relay_frame, ^client, :text, payload}
+    assert %{"type" => ^type, "ts" => ts} = Jason.decode!(payload)
+    assert is_integer(ts)
   end
 end

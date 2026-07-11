@@ -6,6 +6,13 @@ Paseo Relay keeps its public WebSocket protocol independent from its deployment 
 
 This project is under active development and its internal protocols may change without notice.
 
+## Protocol compatibility
+
+`serverId` and v2 `connectionId` are accepted only up to 256 bytes. This is a
+deliberate compatibility difference from the Durable Object relay, which does
+not impose this relay-side route-key limit. Oversized identifiers receive `400`
+before they can create ownership or session state.
+
 ## Development
 
 The Elixir and Erlang versions are managed with [asdf](https://asdf-vm.com/):
@@ -47,6 +54,14 @@ Build a production release with `MIX_ENV=prod asdf exec mix release`, or build
 the generic container with `docker build -t paseo-relay .`. The explicit
 provider adapter in [`deployment/fly`](deployment/fly) translates its platform
 node input into `RELEASE_NODE`; nothing under `lib/` or `scripts/` depends on it.
+
+Cluster ownership is not a quorum protocol. During an OTP network partition, a
+node can only act on the `:global` ownership view it can reach: a request can
+return `503` when its visible owner is unreachable, or a disconnected side can
+admit a separate owner after it no longer sees the original one. Existing
+WebSockets have no transparent migration or cross-partition forwarding. Restore
+or fence the partition before treating reconnects as one session again; see
+[`OPERATIONS.md`](OPERATIONS.md) for the operational consequence.
 
 ## Black-box load testing
 

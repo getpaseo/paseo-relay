@@ -17,7 +17,7 @@ defmodule PaseoRelay.Registry do
   @impl true
   def handle_call({:attach, pid, connection}, _from, state) do
     state = put_in(state.connections[pid], connection)
-    {:reply, :ok, attach(state, pid, connection)}
+    {:reply, {:ok, self()}, attach(state, pid, connection)}
   end
 
   @impl true
@@ -26,6 +26,28 @@ defmodule PaseoRelay.Registry do
   end
 
   def handle_cast({:detach, pid}, state), do: {:noreply, detach(state, pid)}
+
+  @impl true
+  def handle_info({:nudge_control, server_id, connection_id}, state) do
+    session = session(state, server_id)
+
+    if waiting_for_data?(session, connection_id) do
+      notify(session.control, %{type: "sync", connectionIds: Map.keys(session.clients)})
+      Process.send_after(self(), {:reset_control, server_id, connection_id}, 5_000)
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:reset_control, server_id, connection_id}, state) do
+    session = session(state, server_id)
+
+    if waiting_for_data?(session, connection_id) do
+      close(session.control, 1011, "Control unresponsive")
+    end
+
+    {:noreply, state}
+  end
 
   defp attach(state, pid, %Connection{version: 1} = connection) do
     session = session(state, connection.server_id)
@@ -80,6 +102,13 @@ defmodule PaseoRelay.Registry do
       )
 
     notify(session.control, %{type: "connected", connectionId: connection.connection_id})
+
+    Process.send_after(
+      self(),
+      {:nudge_control, connection.server_id, connection.connection_id},
+      10_000
+    )
+
     put_session(state, connection.server_id, %{session | clients: clients})
   end
 
@@ -110,6 +139,10 @@ defmodule PaseoRelay.Registry do
       when connection_id != "" ->
         session = session(state, connection.server_id)
         Enum.each(session.clients[connection_id] || [], &deliver(&1, opcode, payload))
+        state
+
+      %Connection{version: 2, role: :server, connection_id: ""} ->
+        answer_legacy_control_ping(pid, opcode, payload)
         state
 
       _ ->
@@ -217,6 +250,10 @@ defmodule PaseoRelay.Registry do
       map_size(session.pending) == 0
   end
 
+  defp waiting_for_data?(session, connection_id) do
+    Map.has_key?(session.clients, connection_id) and not Map.has_key?(session.data, connection_id)
+  end
+
   defp opposite(:server), do: :client
   defp opposite(:client), do: :server
   defp deliver(nil, _opcode, _payload), do: :ok
@@ -231,6 +268,18 @@ defmodule PaseoRelay.Registry do
   defp close(pid, code, reason), do: send(pid, {:relay_close, code, reason})
   defp notify(nil, _message), do: :ok
   defp notify(pid, message), do: deliver(pid, :text, Jason.encode!(message))
+
+  defp answer_legacy_control_ping(pid, :text, payload) do
+    with {:ok, %{"type" => "ping"}} <- Jason.decode(payload) do
+      send(
+        pid,
+        {:relay_frame, :text,
+         Jason.encode!(%{type: "pong", ts: System.system_time(:millisecond)})}
+      )
+    end
+  end
+
+  defp answer_legacy_control_ping(_pid, _opcode, _payload), do: :ok
 
   defp buffer(session, connection_id, frame) do
     frames = (session.pending[connection_id] || []) ++ [frame]

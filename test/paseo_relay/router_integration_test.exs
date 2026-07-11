@@ -15,6 +15,15 @@ defmodule PaseoRelay.RouterIntegrationTest do
     :gen_tcp.close(socket)
   end
 
+  test "a non-websocket ws request is rejected before it claims session ownership", %{port: port} do
+    server_id = "srv_http_#{System.unique_integer([:positive])}"
+
+    assert "HTTP/1.1 426" <> _ =
+             request(port, "/ws?serverId=#{server_id}&role=client&v=2")
+
+    assert :undefined == PaseoRelay.Ownership.owner_pid(server_id)
+  end
+
   test "oversized route identifiers are rejected before they can claim ownership", %{port: port} do
     server_id = String.duplicate("s", 257)
 

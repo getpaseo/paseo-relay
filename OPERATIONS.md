@@ -30,9 +30,15 @@ session across Machines.
 - **A rolling deployment replaces an owner:** its WebSockets reconnect just as
   they would after a Machine exit. The drain endpoint protects new ownership,
   but graceful connection handoff is not yet part of the deployment lifecycle.
-- **The BEAM cluster partitions:** ownership correctness depends on distributed
-  Erlang's view of the cluster. Partition and recovery behavior must be tested
-  before treating multi-region ownership as lossless.
+- **The BEAM cluster partitions:** this relay does not add quorum or a shared
+  store on top of OTP `:global`. Each side makes routing decisions from the
+  ownership view it can reach. A request that can still see an unreachable owner
+  returns `503` after the bounded owner call; a side that no longer sees that
+  owner can admit a new one. Consequently one logical `serverId` can be served
+  by separate owners while the partition lasts, and existing WebSockets cannot
+  forward or migrate across it. Restore connectivity or fence one side before
+  allowing reconnect traffic to converge; do not advertise this topology as
+  lossless failover.
 
 ## Metrics
 

@@ -6,7 +6,8 @@ defmodule PaseoRelay.Router do
   plug(:dispatch)
 
   get "/ws" do
-    with {:ok, connection} <- PaseoRelay.Connection.from_query(conn.query_params),
+    with :ok <- require_websocket_upgrade(conn),
+         {:ok, connection} <- PaseoRelay.Connection.from_query(conn.query_params),
          decision <- PaseoRelay.Ownership.route(connection.server_id, target()),
          {:local, owner, reservation} <- decision do
       conn
@@ -14,6 +15,7 @@ defmodule PaseoRelay.Router do
         PaseoRelay.Socket,
         %{connection: connection, owner: owner, reservation: reservation},
         compress: false,
+        timeout: nil,
         max_frame_size: 32 * 1024 * 1024
       )
       |> halt()
@@ -25,6 +27,9 @@ defmodule PaseoRelay.Router do
       {:unavailable, reason} ->
         send_resp(conn, 503, Atom.to_string(reason))
 
+      {:upgrade_required, message} ->
+        send_resp(conn, 426, message)
+
       {:error, message} ->
         send_resp(conn, 400, message)
     end
@@ -35,4 +40,12 @@ defmodule PaseoRelay.Router do
   end
 
   defp target, do: Application.fetch_env!(:paseo_relay, :ownership_target)
+
+  defp require_websocket_upgrade(conn) do
+    if Enum.any?(get_req_header(conn, "upgrade"), &(String.downcase(&1) == "websocket")) do
+      :ok
+    else
+      {:upgrade_required, "Expected WebSocket upgrade"}
+    end
+  end
 end
