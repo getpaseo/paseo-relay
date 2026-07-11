@@ -73,6 +73,9 @@
   60-second timeout and closed before its 61-second assertion completed.
 - Green: the route passes `timeout: nil`; the same real socket remains open
   past 61 seconds.
+- Verification correction: ExUnit's default per-test timeout is also 60
+  seconds, so the regression test is explicitly tagged `timeout: 75_000`.
+  The assertion remains a real idle socket held open for 61 seconds.
 
 ## Complete malformed-handshake validation
 

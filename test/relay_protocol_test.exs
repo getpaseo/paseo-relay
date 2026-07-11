@@ -131,6 +131,7 @@ defmodule PaseoRelay.RelayProtocolTest do
     assert_receive {:relay_closed, ^data, {:remote, 1012, "Registry unavailable"}}, 1_000
   end
 
+  @tag timeout: 75_000
   test "an idle websocket remains open past the adapter default timeout" do
     port = available_port()
     {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
