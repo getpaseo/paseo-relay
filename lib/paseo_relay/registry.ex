@@ -12,7 +12,10 @@ defmodule PaseoRelay.Registry do
   def detach(pid), do: GenServer.cast(__MODULE__, {:detach, pid})
 
   @impl true
-  def init(_state), do: {:ok, %{sessions: %{}, connections: %{}}}
+  def init(_state) do
+    Process.flag(:message_queue_data, :off_heap)
+    {:ok, %{sessions: %{}, connections: %{}}}
+  end
 
   @impl true
   def handle_call({:attach, pid, connection}, _from, state) do
