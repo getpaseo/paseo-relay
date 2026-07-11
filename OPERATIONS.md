@@ -7,7 +7,9 @@ stopped spare in each region. Fly Proxy starts an existing spare when the
 running Machines selected for a request are above the 10,000-connection soft
 limit. A Machine stops accepting new connections at the 50,000-connection hard
 limit. Fly never creates Machines automatically, and started spares remain
-running until an operator stops them.
+running until an operator stops them. Stopped spares still participate in
+deployment management: a Machine lease or state transition can block
+`fly deploy` even though that Machine is not serving traffic.
 
 Relay sessions are intentionally not rebalanced. A `serverId` is owned by one
 BEAM node so its frames never cross nodes. Additional Machines increase total
@@ -28,8 +30,13 @@ session across Machines.
   Existing connections remain open. A client pinned to that owner may fail to
   reconnect until capacity is available on the owner or the owner disappears.
 - **A rolling deployment replaces an owner:** its WebSockets reconnect just as
-  they would after a Machine exit. The drain endpoint protects new ownership,
-  but graceful connection handoff is not yet part of the deployment lifecycle.
+  they would after a Machine exit. Ownership convergence can make one logical
+  session reconnect more than once during a rollout; there is no single-reconnect
+  guarantee. Drain is process-local admission state, initialized at boot with
+  `PASEO_RELAY_DRAIN` or changed inside the application through
+  `PaseoRelay.Drain`; there is no drain HTTP endpoint. Fly's deployment
+  lifecycle does not activate this state, so it does not protect ownership
+  during `fly deploy`.
 - **The BEAM cluster partitions:** this relay does not add quorum or a shared
   store on top of OTP `:global`. Each side makes routing decisions from the
   ownership view it can reach. A request that can still see an unreachable owner

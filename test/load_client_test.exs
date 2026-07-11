@@ -1,3 +1,21 @@
+defmodule PaseoRelay.LoadClientTest.DelayedRelay do
+  @behaviour Plug
+
+  @impl Plug
+  def init(options), do: options
+
+  @impl Plug
+  def call(conn, options) do
+    conn = Plug.Conn.fetch_query_params(conn)
+
+    if conn.query_params["role"] == "server" && conn.query_params["connectionId"] do
+      Process.sleep(Keyword.fetch!(options, :delay_ms))
+    end
+
+    PaseoRelay.Router.call(conn, [])
+  end
+end
+
 defmodule PaseoRelay.LoadClientTest do
   use ExUnit.Case, async: false
 
@@ -23,6 +41,44 @@ defmodule PaseoRelay.LoadClientTest do
     assert output =~ "serverId"
     assert output =~ "connectionId"
     assert output =~ "--endpoints"
+    assert output =~ "--cleanup-grace"
+  end
+
+  test "a failed setup closes a sibling socket that opens later" do
+    relay_port = available_port()
+    unavailable_port = available_port()
+
+    relays = [
+      start_endpoint(PaseoRelay.LoadClientTest.DelayedRelay, relay_port, delay_ms: 500),
+      start_endpoint(PaseoRelay.Operations, unavailable_port, [])
+    ]
+
+    on_exit(fn -> Enum.each(relays, &Process.exit(&1, :shutdown)) end)
+
+    {output, status} =
+      run_load(
+        [
+          "--endpoints",
+          "ws://127.0.0.1:#{relay_port}/ws,ws://127.0.0.1:#{unavailable_port}/ws",
+          "--server-id",
+          "delayed-failed-setup",
+          "--pairs",
+          "1",
+          "--duration",
+          "0",
+          "--cleanup-grace",
+          "2"
+        ],
+        3_000
+      )
+
+    result = Jason.decode!(output)
+
+    assert status == 1
+    assert result["connection_failures"] > 0
+    assert result["error"] =~ "non-101 status code"
+    assert result["cleanup_timeouts"] == 0
+    assert metric_value(request(relay_port, "/metrics"), "active_websockets") == 0
   end
 
   @tag :relay
@@ -58,12 +114,14 @@ defmodule PaseoRelay.LoadClientTest do
              "requested_pairs",
              "requested_websockets",
              "connection_failures",
+             "cleanup_timeouts",
              "send_failures"
            ]) == %{
              "scenario" => "sustained",
              "requested_pairs" => 4,
              "requested_websockets" => 9,
              "connection_failures" => 0,
+             "cleanup_timeouts" => 0,
              "send_failures" => 0
            }
 
@@ -111,6 +169,56 @@ defmodule PaseoRelay.LoadClientTest do
     {:ok, port} = :inet.port(socket)
     :ok = :gen_tcp.close(socket)
     port
+  end
+
+  defp start_endpoint(module, port, options) do
+    {:ok, endpoint} = Bandit.start_link(plug: {module, options}, port: port)
+    Process.unlink(endpoint)
+    endpoint
+  end
+
+  defp run_load(arguments, timeout) do
+    command =
+      Port.open({:spawn_executable, System.find_executable("node")}, [
+        :binary,
+        :exit_status,
+        args: ["scripts/relay-load.mjs" | arguments]
+      ])
+
+    await_command(command, "", System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp await_command(command, output, deadline) do
+    remaining = max(0, deadline - System.monotonic_time(:millisecond))
+
+    receive do
+      {^command, {:data, data}} -> await_command(command, output <> data, deadline)
+      {^command, {:exit_status, status}} -> {output, status}
+    after
+      remaining ->
+        {:os_pid, pid} = Port.info(command, :os_pid)
+        System.cmd("kill", ["-KILL", Integer.to_string(pid)])
+        flunk("load client did not exit within #{remaining}ms after setup failed")
+    end
+  end
+
+  defp request(port, path) do
+    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "GET #{path} HTTP/1.1\r\nHost: relay.test\r\nConnection: close\r\n\r\n"
+      )
+
+    {:ok, response} = :gen_tcp.recv(socket, 0, 2_000)
+    :gen_tcp.close(socket)
+    response
+  end
+
+  defp metric_value(metrics, name) do
+    [_, value] = Regex.run(~r/paseo_relay_#{name} (\d+)/, metrics)
+    String.to_integer(value)
   end
 
   defp start_relay(port) do

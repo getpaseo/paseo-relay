@@ -70,7 +70,7 @@ The executable client uses actual WebSockets and the deployed v2 query contract:
 server-data and client roles, so it can measure bidirectional traffic without
 importing relay code. It prints one JSON object containing connection success and
 failure counts, requested pairs and WebSockets, setup and steady durations, frame
-throughput, p50/p95/p99 latency, duration, client RSS/CPU,
+throughput, p50/p95/p99 latency, duration, cleanup timeouts, client RSS/CPU,
 and optional relay RSS/CPU (`--relay-pid`).
 
 Safe local smoke test:
@@ -105,14 +105,17 @@ The sustained example sends in both directions: 1,000 pairs × 5 ticks/s × 2
 frames = 10,000 frames/s. The 50,000-socket target is 25,000 pairs plus one
 control socket. `--batch-size` bounds concurrent opens; `--ramp-ms` spaces each
 batch. `--duration` measures steady traffic only, while JSON reports setup and
-steady durations separately.
+steady durations separately. Teardown waits up to 15 seconds for clean close
+handshakes by default; use `--cleanup-grace` to tune that bound. A close that
+does not finish within the bound is reported as `cleanup_timeouts` and still
+makes the run fail. Abnormal closes remain connection failures.
 
 To distribute a run across load generators, open the daemon control socket on
 one generator and pass `--no-control` to the others. Give every generator a
 different `--connection-prefix`; they can then share one `--server-id` without
 connection ID collisions, exercising a single relay owner through reroutes.
-Use `--keepalive 20` when a slow distributed ramp would otherwise let early
-idle sockets reach the relay's 60-second liveness timeout.
+Use `--keepalive` when a load scenario should include application-level
+heartbeat traffic. The relay itself does not impose an idle WebSocket timeout.
 
 A disposable load-generator image is available without any deployment-provider
 assumptions:

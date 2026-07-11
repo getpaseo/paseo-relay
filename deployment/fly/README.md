@@ -34,6 +34,13 @@ ceiling. Fly Proxy starts an existing stopped Machine when every running
 Machine in the selected region is above the 10,000-connection soft limit.
 It refuses new connections to a Machine at the 50,000-connection hard limit.
 Fly does not create Machines, so provision stopped spares explicitly.
+Stopped spares are still deployment targets; a Machine lease or in-progress
+state transition can block `fly deploy`. Rolling deploys can reconnect one
+logical relay session more than once while ownership converges. The generic
+drain mechanism is process-local admission state, initialized at boot with
+`PASEO_RELAY_DRAIN` or changed through the internal `PaseoRelay.Drain` API.
+There is no drain HTTP endpoint, and Fly's deployment lifecycle does not
+activate this state or protect session ownership during a deploy.
 
 Fly scrapes `/metrics` into its managed Prometheus service. The custom relay
 series appear in Fly's managed Grafana alongside its built-in Machine, proxy,

@@ -24,6 +24,7 @@ const usage = `Usage: node scripts/relay-load.mjs [options]
   --reconnects <n>          Reconnection waves for reconnect scenario (default: 3)
   --payload-bytes <n>       Frame size target (default: 128)
   --keepalive <seconds>     Send a small frame on every socket at this interval
+  --cleanup-grace <seconds> Wait for clean close handshakes (default: 15)
   --relay-pid <pid>         Sample this relay process's RSS and CPU with ps
   --json                    Print one machine-readable JSON result (default)
 
@@ -65,6 +66,7 @@ function args(argv) {
     durationMs: number("--duration", 10) * 1000, rate: number("--rate", 10),
     burst: number("--burst", 0), reconnects: integer("--reconnects", 3),
     keepaliveMs: number("--keepalive", 0) * 1000,
+    cleanupGraceMs: number("--cleanup-grace", 15) * 1000,
     payloadBytes: Math.max(32, number("--payload-bytes", 128)), relayPid: value("--relay-pid", null),
   };
 }
@@ -87,9 +89,14 @@ function open(url, stats, keepaliveMs) {
   let socket;
   const opening = new Promise((resolve, reject) => {
     socket = new WebSocket(url);
-    const state = { opened: false, finalizing: false, closed: false };
+    const state = { opened: false, finalizing: false, closed: false, finished: false };
     socket.loadState = state;
     let failed = false;
+    const finish = () => {
+      if (state.finished) return;
+      state.finished = true;
+      state.resolveFinish();
+    };
     const fail = () => {
       if (!failed) stats.connection_failures += 1;
       failed = true;
@@ -97,14 +104,17 @@ function open(url, stats, keepaliveMs) {
     const timeout = setTimeout(() => {
       fail();
       socket.close();
+      finish();
       reject(new Error("WebSocket open timed out"));
     }, 10_000);
-    state.waitForClose = new Promise((resolveClose) => { state.resolveClose = resolveClose; });
+    state.waitForFinish = new Promise((resolveFinish) => { state.resolveFinish = resolveFinish; });
     socket.addEventListener("open", () => {
       state.opened = true;
       clearTimeout(timeout);
       stats.connection_successes += 1;
-      if (keepaliveMs > 0) {
+      if (state.finalizing) {
+        socket.close(1000, "load complete");
+      } else if (keepaliveMs > 0) {
         state.keepalive = setInterval(() => {
           if (socket.readyState !== WebSocket.OPEN) return;
           try {
@@ -119,6 +129,7 @@ function open(url, stats, keepaliveMs) {
     }, { once: true });
     socket.addEventListener("error", (event) => {
       fail();
+      finish();
       if (!state.opened) {
         clearTimeout(timeout);
         reject(new Error(`WebSocket connection failed${event.message ? `: ${event.message}` : ""}`));
@@ -127,7 +138,7 @@ function open(url, stats, keepaliveMs) {
     socket.addEventListener("close", (event) => {
       state.closed = true;
       clearInterval(state.keepalive);
-      state.resolveClose();
+      finish();
       if (event.code !== 1000 && !(state.finalizing && [1001, 1005, 1012].includes(event.code))) fail();
     });
   });
@@ -150,7 +161,7 @@ async function connectPair(options, index, stats, latencies) {
   try {
     [server, client] = await Promise.all(openings);
   } catch (error) {
-    await finish(openings.map((opening) => opening.socket), stats);
+    await finish(openings.map((opening) => opening.socket), stats, options.cleanupGraceMs);
     throw error;
   }
   for (const socket of [server, client]) {
@@ -173,7 +184,7 @@ async function connectPairs(options, wave, stats, latencies) {
     pairs.push(...results.filter(({ status }) => status === "fulfilled").map(({ value }) => value));
     const failure = results.find(({ status }) => status === "rejected");
     if (failure) {
-      await finish(pairs.flatMap(Object.values), stats);
+      await finish(pairs.flatMap(Object.values), stats, options.cleanupGraceMs);
       throw failure.reason;
     }
     if (first + size < options.pairs && options.rampMs) await sleep(options.rampMs);
@@ -181,18 +192,22 @@ async function connectPairs(options, wave, stats, latencies) {
   return pairs;
 }
 
-async function finish(sockets, stats) {
+async function finish(sockets, stats, cleanupGraceMs) {
   sockets.forEach((socket) => clearInterval(socket.loadState?.keepalive));
-  const openSockets = sockets.filter((socket) => socket.loadState?.opened && !socket.loadState.closed);
-  openSockets.forEach((socket) => { socket.loadState.finalizing = true; });
-  openSockets.forEach((socket) => socket.close(1000, "load complete"));
-  const completed = Promise.all(openSockets.map((socket) => socket.loadState.waitForClose));
+  const unfinishedSockets = sockets.filter((socket) => socket.loadState && !socket.loadState.finished);
+  unfinishedSockets.forEach((socket) => { socket.loadState.finalizing = true; });
+  unfinishedSockets
+    .filter((socket) => socket.readyState === WebSocket.OPEN)
+    .forEach((socket) => socket.close(1000, "load complete"));
+  const completed = Promise.all(unfinishedSockets.map((socket) => socket.loadState.waitForFinish));
   let timeout;
-  const expired = new Promise((resolve) => { timeout = setTimeout(() => resolve(true), 5_000); });
+  const expired = new Promise((resolve) => { timeout = setTimeout(() => resolve(true), cleanupGraceMs); });
   const result = await Promise.race([completed.then(() => false), expired]);
   clearTimeout(timeout);
   if (result) {
-    stats.connection_failures += openSockets.filter((socket) => !socket.loadState.closed).length;
+    const timedOut = unfinishedSockets.filter((socket) => !socket.loadState.finished);
+    stats.cleanup_timeouts += timedOut.length;
+    timedOut.forEach((socket) => socket.close());
   }
 }
 
@@ -215,7 +230,7 @@ async function main() {
   let options;
   try { options = args(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exitCode = 2; return; }
   if (options.help) { process.stdout.write(usage); return; }
-  const stats = { connection_successes: 0, connection_failures: 0, send_failures: 0, keepalive_frames_sent: 0, frames_sent: 0, frames_received: 0, bytes_sent: 0, bytes_received: 0 };
+  const stats = { connection_successes: 0, connection_failures: 0, cleanup_timeouts: 0, send_failures: 0, keepalive_frames_sent: 0, frames_sent: 0, frames_received: 0, bytes_sent: 0, bytes_received: 0 };
   const latencies = [];
   const started = now();
   let setupDurationMs = 0;
@@ -249,12 +264,12 @@ async function main() {
     stats.connection_failures += 1;
     stats.error = error.message;
   } finally {
-    await finish([...pairs.flatMap(Object.values), ...(control ? [control] : [])], stats);
+    await finish([...pairs.flatMap(Object.values), ...(control ? [control] : [])], stats, options.cleanupGraceMs);
   }
   const durationMs = now() - started;
   const resource = process.resourceUsage();
   const relay = sampleRelay(options.relayPid);
-  process.stdout.write(`${JSON.stringify({
+  const output = `${JSON.stringify({
     protocol: { version: 2, roles: ["server-data", "client"] }, scenario: options.scenario,
     endpoints: options.endpoints, requested_pairs: options.pairs,
     requested_websockets: options.pairs * 2 + (options.control ? 1 : 0),
@@ -262,8 +277,9 @@ async function main() {
     ...stats, throughput_frames_per_second: Number((stats.frames_received / (durationMs / 1000)).toFixed(2)),
     latency_ms: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), p99: percentile(latencies, 0.99) },
     client: { rss_bytes: process.memoryUsage().rss, cpu_microseconds: resource.userCPUTime + resource.systemCPUTime }, relay,
-  })}\n`);
-  if (stats.connection_failures || stats.send_failures) process.exitCode = 1;
+  })}\n`;
+  const status = stats.connection_failures || stats.cleanup_timeouts || stats.send_failures ? 1 : 0;
+  process.stdout.write(output, () => process.exit(status));
 }
 
 main();
