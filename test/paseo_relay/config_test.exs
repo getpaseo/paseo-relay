@@ -11,6 +11,10 @@ defmodule PaseoRelay.ConfigTest do
                 ip: {127, 0, 0, 1},
                 port: 4000,
                 drain: false,
+                acceptors: 100,
+                connections_per_acceptor: 200,
+                connection_retry_count: 5,
+                connection_retry_wait_ms: 1_000,
                 node_name: nil,
                 cookie: nil
               }}
@@ -29,5 +33,17 @@ defmodule PaseoRelay.ConfigTest do
   test "recognizes drain mode from the release environment" do
     assert {:ok, %{drain: true, port: 4400}} =
              Config.load([{"PASEO_RELAY_DRAIN", "true"}, {"PASEO_RELAY_PORT", "4400"}])
+  end
+
+  test "loads and validates the listener ceiling as connections per acceptor" do
+    assert {:ok, %{acceptors: 20, connections_per_acceptor: 750}} =
+             Config.load([
+               {"PASEO_RELAY_ACCEPTORS", "20"},
+               {"PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR", "750"}
+             ])
+
+    assert Config.load([{"PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR", "0"}]) ==
+             {:error,
+              "PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR must be an integer between 1 and 1000000"}
   end
 end

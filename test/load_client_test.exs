@@ -22,7 +22,7 @@ defmodule PaseoRelay.LoadClientTest do
   setup context do
     if context[:relay] do
       port = available_port()
-      relay_pid = start_relay(port)
+      relay_pid = start_relay(port, context[:listener] || [])
 
       on_exit(fn ->
         stop_relay(relay_pid)
@@ -164,6 +164,78 @@ defmodule PaseoRelay.LoadClientTest do
     assert result["connection_failures"] == 0
   end
 
+  @tag :relay
+  @tag timeout: 30_000
+  test "an ownership surge opens one real websocket for each distinct server", %{port: port} do
+    {output, status} =
+      System.cmd("node", [
+        "scripts/relay-load.mjs",
+        "--endpoints",
+        "ws://127.0.0.1:#{port}/ws",
+        "--scenario",
+        "ownership",
+        "--servers",
+        "1000",
+        "--batch-size",
+        "200",
+        "--duration",
+        "0"
+      ])
+
+    result = Jason.decode!(output)
+
+    assert status == 0
+
+    assert Map.take(result, [
+             "scenario",
+             "requested_servers",
+             "requested_pairs",
+             "requested_websockets",
+             "connection_successes",
+             "connection_failures",
+             "cleanup_timeouts"
+           ]) == %{
+             "scenario" => "ownership",
+             "requested_servers" => 1000,
+             "requested_pairs" => 0,
+             "requested_websockets" => 1000,
+             "connection_successes" => 1000,
+             "connection_failures" => 0,
+             "cleanup_timeouts" => 0
+           }
+  end
+
+  @tag :relay
+  @tag listener: [
+         acceptors: 1,
+         connections_per_acceptor: 2,
+         connection_retry_count: 0,
+         connection_retry_wait_ms: 0
+       ]
+  test "the listener sheds excess websocket upgrades at its configured ceiling", %{port: port} do
+    {output, status} =
+      System.cmd("node", [
+        "scripts/relay-load.mjs",
+        "--endpoints",
+        "ws://127.0.0.1:#{port}/ws",
+        "--scenario",
+        "ownership",
+        "--servers",
+        "3",
+        "--batch-size",
+        "3",
+        "--duration",
+        "0"
+      ])
+
+    result = Jason.decode!(output)
+
+    assert status == 1
+    assert result["connection_successes"] == 2
+    assert result["connection_failures"] > 0
+    assert metric_value(request(port, "/metrics"), "connection_rejections_total") == 1
+  end
+
   defp available_port do
     {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
     {:ok, port} = :inet.port(socket)
@@ -221,10 +293,13 @@ defmodule PaseoRelay.LoadClientTest do
     String.to_integer(value)
   end
 
-  defp start_relay(port) do
+  defp start_relay(port, listener) do
+    operations =
+      [host: "127.0.0.1", ip: {127, 0, 0, 1}, port: port, drain: false] ++ listener
+
     start =
       """
-      Application.put_env(:paseo_relay, :operations, [host: \"127.0.0.1\", ip: {127, 0, 0, 1}, port: #{port}, drain: false]);
+      Application.put_env(:paseo_relay, :operations, #{inspect(operations)});
       Application.ensure_all_started(:paseo_relay)
       """
 

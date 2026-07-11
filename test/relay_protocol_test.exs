@@ -131,6 +131,37 @@ defmodule PaseoRelay.RelayProtocolTest do
     assert_receive {:relay_closed, ^data, {:remote, 1012, "Registry unavailable"}}, 1_000
   end
 
+  test "v2 sockets fail closed when their distributed session owner exits" do
+    port = available_port()
+    {:ok, relay} = Bandit.start_link(plug: PaseoRelay.Router, port: port)
+    Process.unlink(relay)
+    on_exit(fn -> Process.exit(relay, :shutdown) end)
+
+    {:ok, control} = connect(v2_url(port, "server"))
+    assert_receive {:relay_open, ^control}
+    assert_control(control, %{"type" => "sync", "connectionIds" => []})
+
+    Process.exit(PaseoRelay.Ownership.owner_pid("srv_v2_#{port}"), :session_conflict)
+
+    assert_receive {:relay_closed, ^control, {:remote, 1012, "Session owner moved"}}, 1_000
+  end
+
+  test "v2 socket initialization fails closed when its reserved owner has moved" do
+    server_id = "srv_owner_moved_#{System.unique_integer([:positive])}"
+
+    {:ok, connection} =
+      PaseoRelay.Connection.from_query(%{"serverId" => server_id, "role" => "server", "v" => "2"})
+
+    {:local, owner, reservation} = PaseoRelay.Ownership.route(server_id, "local")
+    owner_down = Process.monitor(owner)
+    Process.exit(owner, :session_conflict)
+    assert_receive {:DOWN, ^owner_down, :process, ^owner, :session_conflict}
+
+    state = %{connection: connection, owner: owner, reservation: reservation}
+
+    assert {:stop, :normal, {1012, "Session expired"}, ^state} = PaseoRelay.Socket.init(state)
+  end
+
   @tag timeout: 75_000
   test "an idle websocket remains open past the adapter default timeout" do
     port = available_port()

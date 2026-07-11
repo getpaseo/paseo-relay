@@ -7,7 +7,8 @@ defmodule PaseoRelay.Socket do
          {:ok, registry} <- PaseoRelay.Registry.attach(self(), connection) do
       PaseoRelay.Metrics.inc(:active_websockets)
       registry_ref = Process.monitor(registry)
-      {:ok, Map.put(state, :registry_ref, registry_ref)}
+      owner_ref = Process.monitor(owner)
+      {:ok, state |> Map.put(:registry_ref, registry_ref) |> Map.put(:owner_ref, owner_ref)}
     else
       _ -> {:stop, :normal, {1012, "Session expired"}, state}
     end
@@ -24,6 +25,10 @@ defmodule PaseoRelay.Socket do
 
   def handle_info({:DOWN, ref, :process, _registry, _reason}, %{registry_ref: ref} = state) do
     {:stop, :normal, {1012, "Registry unavailable"}, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _owner, _reason}, %{owner_ref: ref} = state) do
+    {:stop, :normal, {1012, "Session owner moved"}, state}
   end
 
   def handle_info({:relay_close, code, reason}, state),

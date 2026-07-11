@@ -28,6 +28,7 @@ defmodule PaseoRelay.OperationsTest do
     assert metrics.resp_body =~ "# TYPE paseo_relay_active_websockets gauge"
     assert metrics.resp_body =~ "# TYPE paseo_relay_active_sessions gauge"
     assert metrics.resp_body =~ "# TYPE paseo_relay_reroute_responses_total counter"
+    assert metrics.resp_body =~ "# TYPE paseo_relay_connection_rejections_total counter"
     assert metrics.resp_body =~ "# TYPE paseo_relay_frames_forwarded_total counter"
     assert metrics.resp_body =~ "# TYPE paseo_relay_bytes_forwarded_total counter"
     assert metrics.resp_body =~ "paseo_relay_ready 1"
@@ -35,7 +36,10 @@ defmodule PaseoRelay.OperationsTest do
   end
 
   test "readiness and its metric stay false until the configured cluster floor is present" do
-    Application.put_env(:paseo_relay, :minimum_cluster_size, 2)
+    visible_cluster_size =
+      length(:syn.subcluster_nodes(:registry, :paseo_relay_owners)) + 1
+
+    Application.put_env(:paseo_relay, :minimum_cluster_size, visible_cluster_size + 1)
     on_exit(fn -> Application.put_env(:paseo_relay, :minimum_cluster_size, 1) end)
 
     readiness = Operations.call(conn(:get, "/ready"), [])
@@ -43,5 +47,44 @@ defmodule PaseoRelay.OperationsTest do
 
     assert {readiness.status, readiness.resp_body} == {503, ~s({"status":"unready"})}
     assert metrics.resp_body =~ "paseo_relay_ready 0"
+  end
+
+  test "metrics recovers from an abrupt process failure without taking down the relay" do
+    supervisor = Process.whereis(PaseoRelay.Supervisor)
+    metrics = Process.whereis(PaseoRelay.Metrics)
+    metrics_down = Process.monitor(metrics)
+    PaseoRelay.Metrics.inc(:reroute_responses)
+    reroutes_before_failure = PaseoRelay.Metrics.value(:reroute_responses)
+
+    Process.exit(metrics, :kill)
+
+    assert_receive {:DOWN, ^metrics_down, :process, ^metrics, :killed}
+    replacement = await_metrics_replacement(metrics)
+    response = Operations.call(conn(:get, "/metrics"), [])
+
+    assert Process.alive?(supervisor)
+    assert Process.alive?(replacement)
+    assert response.status == 200
+    assert PaseoRelay.Metrics.value(:reroute_responses) == reroutes_before_failure
+  end
+
+  defp await_metrics_replacement(previous) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    await_metrics_replacement(previous, deadline)
+  end
+
+  defp await_metrics_replacement(previous, deadline) do
+    case Process.whereis(PaseoRelay.Metrics) do
+      replacement when is_pid(replacement) and replacement != previous ->
+        replacement
+
+      _missing ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("metrics did not restart")
+        end
+
+        Process.sleep(10)
+        await_metrics_replacement(previous, deadline)
+    end
   end
 end

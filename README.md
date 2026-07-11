@@ -39,13 +39,17 @@ generic:
 | `PASEO_RELAY_REROUTE_HEADER` | `x-reroute-target` | Response header used by the deployment adapter. |
 | `PASEO_RELAY_CLUSTER_QUERY` | unset | Optional DNS query used to discover BEAM peers. |
 | `PASEO_RELAY_MIN_CLUSTER_SIZE` | `1` | Minimum nodes required before accepting unowned sessions. |
+| `PASEO_RELAY_ACCEPTORS` | `100` | Listener acceptor processes. |
+| `PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR` | `200` | Live connections allowed per acceptor; the default node ceiling is 20,000. |
+| `PASEO_RELAY_CONNECTION_RETRY_COUNT` | `5` | Bounded listener retries when an acceptor reaches its connection ceiling. |
+| `PASEO_RELAY_CONNECTION_RETRY_WAIT_MS` | `1000` | Delay between bounded listener retries. |
 | `RELEASE_NODE` / `RELEASE_COOKIE` | unset | Standard distributed-release identity. |
 
 `GET /health` is a liveness probe. `GET /ready` returns `200` only while the
 node accepts new work, and returns `503 {"status":"unready"}` while draining
 or below the configured cluster floor. `GET /metrics` is Prometheus text and
 exposes readiness, draining, active WebSockets, active sessions, reroutes,
-forwarded frames, and forwarded bytes for the local node.
+listener rejections, forwarded frames, and forwarded bytes for the local node.
 
 See [`OPERATIONS.md`](OPERATIONS.md) for the production failure model,
 capacity policy, and alerting signals.
@@ -55,13 +59,14 @@ the generic container with `docker build -t paseo-relay .`. The explicit
 provider adapter in [`deployment/fly`](deployment/fly) translates its platform
 node input into `RELEASE_NODE`; nothing under `lib/` or `scripts/` depends on it.
 
-Cluster ownership is not a quorum protocol. During an OTP network partition, a
-node can only act on the `:global` ownership view it can reach: a request can
-return `503` when its visible owner is unreachable, or a disconnected side can
-admit a separate owner after it no longer sees the original one. Existing
+Cluster ownership uses [Syn](https://hexdocs.pm/syn/readme.html), an eventually
+consistent distributed process registry. A network partition can temporarily
+admit one owner for the same `serverId` on each side. When the registry
+converges, Syn keeps one owner and the losing owner's WebSockets close with
+`1012`, causing clients to reconnect through normal routing. Existing
 WebSockets have no transparent migration or cross-partition forwarding. Restore
-or fence the partition before treating reconnects as one session again; see
-[`OPERATIONS.md`](OPERATIONS.md) for the operational consequence.
+or fence a prolonged partition before treating reconnects as one session again;
+see [`OPERATIONS.md`](OPERATIONS.md) for the operational consequence.
 
 ## Black-box load testing
 
@@ -78,6 +83,7 @@ Safe local smoke test:
 ```sh
 node scripts/relay-load.mjs --scenario idle --pairs 10 --duration 10
 node scripts/relay-load.mjs --scenario sustained --pairs 10 --rate 10 --duration 10
+node scripts/relay-load.mjs --scenario ownership --servers 1000 --batch-size 200 --duration 1
 ```
 
 Distributed ownership and reroute decisions are exercised with real local BEAM
@@ -85,6 +91,7 @@ peer nodes in the test suite:
 
 ```sh
 mix test test/paseo_relay/router_integration_test.exs test/paseo_relay_test.exs
+PASEO_OWNERSHIP_SURGE_COUNT=50000 mix test test/paseo_relay_test.exs
 ```
 
 A multi-node data test must run behind a deployment adapter capable of replaying
@@ -92,18 +99,22 @@ the original WebSocket upgrade. The Fly adapter uses `fly-replay`; all load
 clients still use one public endpoint and the proxy performs node placement.
 
 Capacity tests need an appropriate file-descriptor limit and kernel socket
-budget. Example high-load commands, deliberately not defaults:
+budget. The ownership scenario opens one real daemon-control WebSocket for each
+distinct `serverId`; it measures ownership churn rather than many clients on one
+daemon. Example high-load commands, deliberately not defaults:
 
 ```sh
 ulimit -n 120000
+node scripts/relay-load.mjs --scenario ownership --servers 15000 --batch-size 500 --duration 30 --relay-pid "$RELAY_PID"
 node scripts/relay-load.mjs --scenario idle --pairs 25000 --batch-size 250 --ramp-ms 100 --duration 300 --relay-pid "$RELAY_PID"
 node scripts/relay-load.mjs --scenario sustained --pairs 1000 --batch-size 250 --ramp-ms 100 --rate 5 --duration 300 --relay-pid "$RELAY_PID"
 node scripts/relay-load.mjs --scenario reconnect --pairs 1000 --batch-size 250 --ramp-ms 100 --reconnects 20 --duration 10
 ```
 
 The sustained example sends in both directions: 1,000 pairs × 5 ticks/s × 2
-frames = 10,000 frames/s. The 50,000-socket target is 25,000 pairs plus one
-control socket. `--batch-size` bounds concurrent opens; `--ramp-ms` spaces each
+frames = 10,000 frames/s. The 50,000-socket command is a stress target for a
+node configured with a higher ceiling and enough memory, not the production
+default. `--batch-size` bounds concurrent opens; `--ramp-ms` spaces each
 batch. `--duration` measures steady traffic only, while JSON reports setup and
 steady durations separately. Teardown waits up to 15 seconds for clean close
 handshakes by default; use `--cleanup-grace` to tune that bound. A close that

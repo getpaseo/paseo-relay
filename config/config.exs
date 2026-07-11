@@ -1,5 +1,9 @@
 import Config
 
+config :syn,
+  scopes: [:paseo_relay_owners],
+  strict_mode: true
+
 config :paseo_relay,
   operations: [host: "127.0.0.1", ip: {127, 0, 0, 1}, port: 4000, drain: false],
   ownership_target: "local",

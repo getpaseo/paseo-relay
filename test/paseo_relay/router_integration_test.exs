@@ -59,7 +59,10 @@ defmodule PaseoRelay.RouterIntegrationTest do
   end
 
   test "health is live while readiness blocks new websocket ownership", %{port: port} do
-    Application.put_env(:paseo_relay, :minimum_cluster_size, 2)
+    visible_cluster_size =
+      length(:syn.subcluster_nodes(:registry, :paseo_relay_owners)) + 1
+
+    Application.put_env(:paseo_relay, :minimum_cluster_size, visible_cluster_size + 1)
     on_exit(fn -> Application.delete_env(:paseo_relay, :minimum_cluster_size) end)
 
     assert "HTTP/1.1 200" <> _ = request(port, "/health")
@@ -84,7 +87,7 @@ defmodule PaseoRelay.RouterIntegrationTest do
     {:local, _owner, _reservation} =
       :rpc.call(peer_node, PaseoRelay.Ownership, :route, [server_id, "peer-target"])
 
-    owner = :global.whereis_name({PaseoRelay.Ownership, server_id})
+    owner = await_owner(server_id)
     assert is_pid(owner)
     assert node(owner) == peer_node
 
@@ -164,6 +167,10 @@ defmodule PaseoRelay.RouterIntegrationTest do
 
     :ok = :rpc.call(peer_node, :code, :add_paths, [:code.get_path()])
 
+    :ok = :rpc.call(peer_node, :application, :set_env, [:syn, :strict_mode, true])
+    {:ok, _apps} = :rpc.call(peer_node, :application, :ensure_all_started, [:syn])
+    :ok = :rpc.call(peer_node, :syn, :add_node_to_scopes, [[:paseo_relay_owners]])
+
     :ok =
       :rpc.call(peer_node, :application, :set_env, [
         :paseo_relay,
@@ -173,5 +180,25 @@ defmodule PaseoRelay.RouterIntegrationTest do
 
     assert {:ok, _apps} = :rpc.call(peer_node, :application, :ensure_all_started, [:paseo_relay])
     {peer, peer_node}
+  end
+
+  defp await_owner(server_id) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    await_owner(server_id, deadline)
+  end
+
+  defp await_owner(server_id, deadline) do
+    case PaseoRelay.Ownership.owner_pid(server_id) do
+      owner when is_pid(owner) ->
+        owner
+
+      :undefined ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("remote owner did not reach the local Syn registry")
+        end
+
+        Process.sleep(10)
+        await_owner(server_id, deadline)
+    end
   end
 end

@@ -5,7 +5,7 @@
 The production topology keeps one Machine running in each region and one
 stopped spare in each region. Fly Proxy starts an existing spare when the
 running Machines selected for a request are above the 10,000-connection soft
-limit. A Machine stops accepting new connections at the 50,000-connection hard
+limit. A Machine stops accepting new connections at the 15,000-connection hard
 limit. Fly never creates Machines automatically, and started spares remain
 running until an operator stops them. Stopped spares still participate in
 deployment management: a Machine lease or state transition can block
@@ -15,6 +15,22 @@ Relay sessions are intentionally not rebalanced. A `serverId` is owned by one
 BEAM node so its frames never cross nodes. Additional Machines increase total
 fleet capacity for new sessions; they cannot split one exceptionally large
 session across Machines.
+
+The listener has a second, provider-independent safety ceiling. Thousand Island
+runs 100 acceptors with 200 connections each by default, for 20,000 live
+connections per node. When one acceptor is full it performs five bounded retries
+one second apart, then closes the new connection and emits
+`paseo_relay_connection_rejections_total`. The values are configurable through
+the generic `PASEO_RELAY_ACCEPTORS`,
+`PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR`,
+`PASEO_RELAY_CONNECTION_RETRY_COUNT`, and
+`PASEO_RELAY_CONNECTION_RETRY_WAIT_MS` settings.
+
+There is deliberately no application queue for WebSocket upgrades. Holding an
+upgraded socket while ownership work waits would consume the same scarce file
+descriptor and memory and turn overload into an invisible client timeout. The
+listener provides a bounded wait; after that, shedding the connection lets the
+existing client reconnect policy provide backpressure.
 
 ## Failure behavior
 
@@ -37,15 +53,14 @@ session across Machines.
   `PaseoRelay.Drain`; there is no drain HTTP endpoint. Fly's deployment
   lifecycle does not activate this state, so it does not protect ownership
   during `fly deploy`.
-- **The BEAM cluster partitions:** this relay does not add quorum or a shared
-  store on top of OTP `:global`. Each side makes routing decisions from the
-  ownership view it can reach. A request that can still see an unreachable owner
-  returns `503` after the bounded owner call; a side that no longer sees that
-  owner can admit a new one. Consequently one logical `serverId` can be served
-  by separate owners while the partition lasts, and existing WebSockets cannot
-  forward or migrate across it. Restore connectivity or fence one side before
-  allowing reconnect traffic to converge; do not advertise this topology as
-  lossless failover.
+- **The BEAM cluster partitions:** ownership uses Syn's available, strongly
+  eventually consistent registry rather than a quorum or shared store. Each side
+  can admit an owner for the same `serverId` while disconnected. When the
+  cluster heals, Syn resolves the conflict to one owner; sockets monitoring a
+  losing owner close with `1012` and reconnect. Existing WebSockets cannot
+  forward or migrate across the partition. Restore connectivity or fence one
+  side before treating reconnects as converged; do not advertise this topology
+  as lossless failover.
 
 ## Metrics
 
@@ -61,7 +76,8 @@ Start with dashboards and alerts for:
 - allocated file descriptors above 70% of the Machine limit;
 - sustained high memory, CPU, scheduler pressure, or network throughput;
 - Machine exits, OOM kills, and unhealthy checks;
-- unexpected spikes in reroutes or WebSocket reconnects.
+- unexpected spikes in reroutes or WebSocket reconnects;
+- any increase in `paseo_relay_connection_rejections_total`.
 
 Fly's managed Grafana provides dashboards, but alert delivery needs a separate
 Grafana/Alertmanager setup. The next metrics needed for incident diagnosis are

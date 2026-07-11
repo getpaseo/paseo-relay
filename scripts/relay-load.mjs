@@ -11,13 +11,14 @@ const usage = `Usage: node scripts/relay-load.mjs [options]
 
   --endpoints <ws-url,...>  Relay /ws endpoint(s); two values exercise two nodes.
   --server-id <id>          v2 serverId (default: load-server)
+  --servers <n>             Distinct v2 control sockets for ownership scenario
   --pairs <n>               Paired client/server data sockets (default: 10)
   --connections <n>         Backward-compatible alias for --pairs
   --connection-prefix <id>  Unique connection ID prefix for sharded runs
   --no-control              Do not open the shared v2 daemon control socket
-  --batch-size <n>          Maximum pairs opened concurrently (default: 100)
+  --batch-size <n>          Maximum pairs or servers opened concurrently (default: 100)
   --ramp-ms <milliseconds>  Delay between opening batches (default: 0)
-  --scenario <name>         idle, sustained, burst, or reconnect (default: idle)
+  --scenario <name>         idle, sustained, burst, reconnect, or ownership (default: idle)
   --duration <seconds>      Measurement duration (default: 10)
   --rate <messages/s>       Bidirectional sustained rate (default: 10)
   --burst <n>               Bidirectional messages sent once after connection
@@ -54,11 +55,12 @@ function args(argv) {
     .split(",").map((endpoint) => endpoint.trim()).filter(Boolean);
   if (!endpoints.length) throw new Error("--endpoints needs at least one WebSocket URL");
   const scenario = value("--scenario", "idle");
-  if (!new Set(["idle", "sustained", "burst", "reconnect"]).has(scenario)) {
-    throw new Error("--scenario must be idle, sustained, burst, or reconnect");
+  if (!new Set(["idle", "sustained", "burst", "reconnect", "ownership"]).has(scenario)) {
+    throw new Error("--scenario must be idle, sustained, burst, reconnect, or ownership");
   }
   return {
     endpoints, serverId: value("--server-id", "load-server"), scenario,
+    servers: integer("--servers", 1000),
     connectionPrefix: value("--connection-prefix", String(process.pid)),
     control: !argv.includes("--no-control"),
     pairs: argv.includes("--pairs") ? integer("--pairs", 10) : integer("--connections", 10),
@@ -192,6 +194,29 @@ async function connectPairs(options, wave, stats, latencies) {
   return pairs;
 }
 
+async function connectServers(options, stats) {
+  const sockets = [];
+  for (let first = 0; first < options.servers; first += options.batchSize) {
+    const size = Math.min(options.batchSize, options.servers - first);
+    const openings = Array.from({ length: size }, (_, offset) => {
+      const index = first + offset;
+      const serverEndpoint = options.endpoints[index % options.endpoints.length];
+      const serverId = `${options.serverId}-${options.connectionPrefix}-${index}`;
+      return open(endpoint(serverEndpoint, { serverId, role: "server", v: "2" }), stats, options.keepaliveMs);
+    });
+    const results = await Promise.allSettled(openings);
+    sockets.push(...results.filter(({ status }) => status === "fulfilled").map(({ value }) => value));
+    const failure = results.find(({ status }) => status === "rejected");
+    if (failure) {
+      const createdSockets = openings.map((opening) => opening.socket);
+      await finish([...new Set([...sockets, ...createdSockets])], stats, options.cleanupGraceMs);
+      throw failure.reason;
+    }
+    if (first + size < options.servers && options.rampMs) await sleep(options.rampMs);
+  }
+  return sockets;
+}
+
 async function finish(sockets, stats, cleanupGraceMs) {
   sockets.forEach((socket) => clearInterval(socket.loadState?.keepalive));
   const unfinishedSockets = sockets.filter((socket) => socket.loadState && !socket.loadState.finished);
@@ -236,15 +261,20 @@ async function main() {
   let setupDurationMs = 0;
   let steadyDurationMs = 0;
   let pairs = [];
+  let servers = [];
   let control;
   try {
-    if (options.control) {
+    if (options.scenario === "ownership") {
+      servers = await connectServers(options, stats);
+    } else if (options.control) {
       control = await open(endpoint(options.endpoints[0], { serverId: options.serverId, role: "server", v: "2" }), stats, options.keepaliveMs);
     }
-    const waves = options.scenario === "reconnect" ? options.reconnects + 1 : 1;
-    for (let wave = 0; wave < waves; wave += 1) {
-      pairs = await connectPairs(options, wave, stats, latencies);
-      if (wave < waves - 1) { pairs.flatMap(Object.values).forEach((socket) => socket.close(1000, "load reconnect")); await sleep(100); }
+    if (options.scenario !== "ownership") {
+      const waves = options.scenario === "reconnect" ? options.reconnects + 1 : 1;
+      for (let wave = 0; wave < waves; wave += 1) {
+        pairs = await connectPairs(options, wave, stats, latencies);
+        if (wave < waves - 1) { pairs.flatMap(Object.values).forEach((socket) => socket.close(1000, "load reconnect")); await sleep(100); }
+      }
     }
     setupDurationMs = now() - started;
     const steadyStarted = now();
@@ -261,18 +291,21 @@ async function main() {
     }
     steadyDurationMs = now() - steadyStarted;
   } catch (error) {
-    stats.connection_failures += 1;
     stats.error = error.message;
   } finally {
-    await finish([...pairs.flatMap(Object.values), ...(control ? [control] : [])], stats, options.cleanupGraceMs);
+    await finish([...servers, ...pairs.flatMap(Object.values), ...(control ? [control] : [])], stats, options.cleanupGraceMs);
   }
   const durationMs = now() - started;
   const resource = process.resourceUsage();
   const relay = sampleRelay(options.relayPid);
   const output = `${JSON.stringify({
     protocol: { version: 2, roles: ["server-data", "client"] }, scenario: options.scenario,
-    endpoints: options.endpoints, requested_pairs: options.pairs,
-    requested_websockets: options.pairs * 2 + (options.control ? 1 : 0),
+    endpoints: options.endpoints,
+    requested_servers: options.scenario === "ownership" ? options.servers : (options.control ? 1 : 0),
+    requested_pairs: options.scenario === "ownership" ? 0 : options.pairs,
+    requested_websockets: options.scenario === "ownership"
+      ? options.servers
+      : options.pairs * 2 + (options.control ? 1 : 0),
     setup_duration_ms: Math.round(setupDurationMs), steady_duration_ms: Math.round(steadyDurationMs), duration_ms: Math.round(durationMs),
     ...stats, throughput_frames_per_second: Number((stats.frames_received / (durationMs / 1000)).toFixed(2)),
     latency_ms: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), p99: percentile(latencies, 0.99) },

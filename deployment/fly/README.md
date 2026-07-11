@@ -32,7 +32,7 @@ The entrypoint raises the per-process file descriptor limit to 100,000 by
 default. Override `PASEO_RELAY_NOFILE` when a deployment needs a different
 ceiling. Fly Proxy starts an existing stopped Machine when every running
 Machine in the selected region is above the 10,000-connection soft limit.
-It refuses new connections to a Machine at the 50,000-connection hard limit.
+It refuses new connections to a Machine at the 15,000-connection hard limit.
 Fly does not create Machines, so provision stopped spares explicitly.
 Stopped spares are still deployment targets; a Machine lease or in-progress
 state transition can block `fly deploy`. Rolling deploys can reconnect one
