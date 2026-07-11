@@ -15,7 +15,7 @@ defmodule PaseoRelay.Router do
         PaseoRelay.Socket,
         %{connection: connection, owner: owner, reservation: reservation},
         compress: false,
-        timeout: nil,
+        timeout: :infinity,
         max_frame_size: 32 * 1024 * 1024
       )
       |> halt()

@@ -69,10 +69,12 @@
 
 ### No relay idle disconnect
 
-- Red: the real idle-WebSocket regression ran against the adapter's inherited
-  60-second timeout and closed before its 61-second assertion completed.
-- Green: the route passes `timeout: nil`; the same real socket remains open
-  past 61 seconds.
+- Red: the real idle-WebSocket regression ran with `timeout: nil` and received
+  a remote `1002` close after 60 seconds. Bandit treats `nil` as no timeout
+  override, so ThousandIsland retained its server-level 60-second read timer.
+- Green: the route passes `timeout: :infinity`, which ThousandIsland handles as
+  a persistent override and uses to cancel the read timer. The same real socket
+  remains open past 61 seconds.
 - Verification correction: ExUnit's default per-test timeout is also 60
   seconds, so the regression test is explicitly tagged `timeout: 75_000`.
   The assertion remains a real idle socket held open for 61 seconds.
