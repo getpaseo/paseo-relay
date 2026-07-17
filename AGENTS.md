@@ -22,7 +22,12 @@ nodes, and never stack production actions.
 | [README.md](README.md) | Protocol compatibility, dev setup, configuration reference, black-box load testing |
 | [OPERATIONS.md](OPERATIONS.md) | The production bar, diagnostics discipline, capacity model, failure behavior, metrics/alerting |
 | [TDD.md](TDD.md) | Red/green evidence log for every behavior — the test methodology record |
-| [deployment/fly/README.md](deployment/fly/README.md) | The Fly.io adapter: cluster bootstrap, `fly-replay` rerouting, capacity policy |
+| [deployment/fly/README.md](deployment/fly/README.md) | The Fly.io adapter: bootstrap, manual deployment policy, and a generic health-check/incident cookbook |
+
+For a Fly health check, read `OPERATIONS.md` first and then follow the cookbook
+in `deployment/fly/README.md`. Health checks are read-only: do not deploy,
+restart, resize, cordon, or stop a Machine unless the user explicitly asks for
+an intervention after the failure is confirmed.
 
 ## Development
 

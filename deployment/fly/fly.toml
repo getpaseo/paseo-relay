@@ -1,5 +1,5 @@
 app = "replace-with-your-app"
-primary_region = "ams"
+primary_region = "replace-with-your-region"
 kill_signal = "SIGTERM"
 kill_timeout = "30s"
 
@@ -15,7 +15,7 @@ kill_timeout = "30s"
   internal_port = 4000
   force_https = true
   auto_stop_machines = "off"
-  auto_start_machines = true
+  auto_start_machines = false
 
   [http_service.concurrency]
     type = "connections"
