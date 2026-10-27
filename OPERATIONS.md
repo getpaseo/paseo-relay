@@ -381,3 +381,34 @@ Fly's managed Grafana provides dashboards, but alert delivery needs a separate
 Grafana/Alertmanager setup. The next metrics needed for incident diagnosis are
 low-cardinality counters for rejected upgrades, close reasons, ownership
 takeovers, and cluster peer count.
+
+## VM mesh adapter
+
+[deployment/mesh/README.md](deployment/mesh/README.md) defines the Ubuntu,
+WireGuard and Caddy deployment. The application ceiling remains 20,000 active
+WebSockets per node; the sample 8 GiB VM selects a provisional 6 GiB BEAM memory
+watermark. Caddy and OS memory are outside that watermark. The 12k-socket
+staging gate must establish bounded combined RSS and zero rejections before
+production. Local cross-node CI does not certify VM capacity.
+
+A non-owner returns one `409` and Caddy retries the unchanged upgrade directly
+on the advertised owner over WireGuard. An unreachable target fails before
+`101`; the client's reconnect re-resolves ownership. There is no second-owner
+retry. Frames travel as raw proxy bytes, never over BEAM distribution. Both
+the ingress proxy and owner VM remain dependencies of that socket.
+
+`deploy.sh` serializes fleet operations, begins drain and verifies `/ready`=503
+before replacing any relay, waits 60 seconds for health-monitor withdrawal,
+and aborts with drain cancelled if sockets remain unless the operator explicitly
+selects a disconnect rollout. Drain blocks new ownership, not attachments to
+existing owners. A replacement closes its owned sockets; no sessions migrate.
+The script leaves Caddy running and checks every node twice before the next
+replacement. DNS health-monitor withdrawal must fit inside the grace period;
+DNS caches mean it does not guarantee zero fresh arrivals.
+
+Never reload Caddy during routine operations: its `stream_close_delay 24h`
+delays reload closes, it does not eliminate them. Certificate renewal is not a
+reload. Schedule any necessary proxy replacement as its own reconnect event.
+Scrape per-node metrics and provision alerts separately; this adapter does not
+install a monitoring backend. Do not combine DNS cutover, proxy maintenance,
+WireGuard changes, load testing and relay replacement in one production action.

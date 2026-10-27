@@ -1,0 +1,56 @@
+x-relay: &relay
+  image: ${MESH_RELAY_IMAGE:?set MESH_RELAY_IMAGE}
+  environment: &environment
+    ERL_FLAGS: +S 2
+    ELIXIR_ERL_OPTIONS: +fnu
+    RELEASE_DISTRIBUTION: name
+    RELEASE_COOKIE: local-mesh-e2e-only
+    PASEO_RELAY_CLUSTER_NODES: paseo_relay@relay-a.mesh,paseo_relay@relay-b.mesh,paseo_relay@relay-c.mesh
+    PASEO_RELAY_MIN_CLUSTER_SIZE: 3
+    PASEO_RELAY_REROUTE_HEADER: x-reroute-target
+services:
+  relay-a:
+    <<: *relay
+    hostname: relay-a.mesh
+    networks:
+      default:
+        aliases: [relay-a.mesh]
+    environment:
+      <<: *environment
+      RELEASE_NODE: paseo_relay@relay-a.mesh
+      PASEO_RELAY_OWNERSHIP_TARGET: relay-a:4000
+  relay-b:
+    <<: *relay
+    hostname: relay-b.mesh
+    networks:
+      default:
+        aliases: [relay-b.mesh]
+    environment:
+      <<: *environment
+      RELEASE_NODE: paseo_relay@relay-b.mesh
+      PASEO_RELAY_OWNERSHIP_TARGET: relay-b:4000
+  relay-c:
+    <<: *relay
+    hostname: relay-c.mesh
+    networks:
+      default:
+        aliases: [relay-c.mesh]
+    environment:
+      <<: *environment
+      RELEASE_NODE: paseo_relay@relay-c.mesh
+      PASEO_RELAY_OWNERSHIP_TARGET: relay-c:4000
+  caddy-a:
+    image: caddy:2.11.7-alpine
+    volumes:
+      - ${MESH_E2E_CONFIG_DIR:?}/a.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports: ["127.0.0.1:${MESH_E2E_PORT_A:-4410}:80"]
+  caddy-b:
+    image: caddy:2.11.7-alpine
+    volumes:
+      - ${MESH_E2E_CONFIG_DIR:?}/b.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports: ["127.0.0.1:${MESH_E2E_PORT_B:-4411}:80"]
+  caddy-c:
+    image: caddy:2.11.7-alpine
+    volumes:
+      - ${MESH_E2E_CONFIG_DIR:?}/c.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports: ["127.0.0.1:${MESH_E2E_PORT_C:-4412}:80"]

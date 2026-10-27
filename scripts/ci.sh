@@ -52,6 +52,7 @@ readonly generic_container="paseo-relay-ci-generic-${run_id}"
 readonly fly_container="paseo-relay-ci-fly-${run_id}"
 
 release_pid=""
+mesh_caddy_config=""
 
 cleanup() {
   if [[ -n "${release_pid}" ]] && kill -0 "${release_pid}" 2>/dev/null; then
@@ -60,6 +61,7 @@ cleanup() {
   fi
 
   docker rm --force "${generic_container}" "${fly_container}" >/dev/null 2>&1 || true
+  if [[ -n "${mesh_caddy_config}" ]]; then rm -f "${mesh_caddy_config}"; fi
 }
 
 trap cleanup EXIT
@@ -192,3 +194,24 @@ if ! grep --quiet '"status":"ok"' <<<"${replay_output}"; then
   print_bounded_rpc_output "Fly replay RPC output" "${replay_output}"
   exit 1
 fi
+
+# Both deployment adapters remain merge gates. The mesh probe uses the generic image.
+MESH_RELAY_IMAGE="${generic_image}" deployment/mesh/e2e/run.sh --skip-build
+MESH_RELAY_IMAGE="${generic_image}" deployment/mesh/e2e/binding.sh
+python3 deployment/mesh/test_render.py
+bash -n deployment/mesh/{render,bootstrap,deploy,rpc}.sh deployment/mesh/e2e/{run,binding}.sh
+docker build --file deployment/mesh/Dockerfile.caddy --tag "paseo-relay-ci-caddy:${run_id}" .
+
+mesh_caddy_config="$(mktemp)"
+python3 - "${mesh_caddy_config}" <<'PYTHON'
+from pathlib import Path
+import sys
+config = Path("deployment/mesh/Caddyfile.tmpl").read_text()
+config = config.replace("@SITES@", "relay-ci.example.com, relay-second-ci.example.com").replace("@LOCAL@", "127.0.0.1:4000")
+config = config.replace("@TLS@", "tls {\n dns cloudflare {env.CF_API_TOKEN}\n}")
+Path(sys.argv[1]).write_text(config)
+PYTHON
+# Provision validation only: no listener, DNS request, or certificate order.
+docker run --rm --env CF_API_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --volume "${mesh_caddy_config}:/etc/caddy/Caddyfile:ro" \
+  "paseo-relay-ci-caddy:${run_id}" caddy adapt --config /etc/caddy/Caddyfile --validate >/dev/null

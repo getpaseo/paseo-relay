@@ -1,0 +1,24 @@
+{
+	admin off
+	# Host network: use TCP only, no public QUIC/UDP listener.
+	servers {
+		protocols h1 h2
+	}
+}
+@SITES@ {
+@TLS@
+	reverse_proxy @LOCAL@ {
+		stream_close_delay 24h
+		# No stream/read/write timeout: quiet data tunnels are normal.
+		@reroute {
+			status 409
+			header x-reroute-target *
+		}
+		handle_response @reroute {
+			reverse_proxy {rp.header.X-Reroute-Target} {
+				stream_close_delay 24h
+				# One hop only. A second 409 or unreachable owner fails the upgrade.
+			}
+		}
+	}
+}

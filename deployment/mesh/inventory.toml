@@ -1,0 +1,38 @@
+# Documentation addresses and placeholder public keys: replace before bootstrap.
+[mesh]
+hostnames = ["relay-next.example.com"]
+# Day before cutover: add the production hostname as a second entry.
+minimum_cluster_size = 2
+distribution_port = 9100
+# Only this administration network may reach SSH; never use 0.0.0.0/0.
+ssh_cidr = "198.51.100.10/32"
+
+[[nodes]]
+name = "fra"
+provider = "vultr"
+region = "fra"
+public_ip = "192.0.2.1"
+wg_ip = "10.77.0.1"
+wg_pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+size = "4vcpu-8gb"
+memory_watermark_bytes = 6442450944
+
+[[nodes]]
+name = "ewr"
+provider = "vultr"
+region = "ewr"
+public_ip = "192.0.2.2"
+wg_ip = "10.77.0.2"
+wg_pubkey = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+size = "4vcpu-8gb"
+memory_watermark_bytes = 6442450944
+
+[[nodes]]
+name = "nrt"
+provider = "vultr"
+region = "nrt"
+public_ip = "192.0.2.3"
+wg_ip = "10.77.0.3"
+wg_pubkey = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+size = "4vcpu-8gb"
+memory_watermark_bytes = 6442450944

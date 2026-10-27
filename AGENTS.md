@@ -23,6 +23,7 @@ nodes, and never stack production actions.
 | [OPERATIONS.md](OPERATIONS.md) | The production bar, diagnostics discipline, capacity model, failure behavior, metrics/alerting |
 | [TDD.md](TDD.md) | Red/green evidence log for every behavior — the test methodology record |
 | [deployment/fly/README.md](deployment/fly/README.md) | The Fly.io adapter: bootstrap, manual deployment policy, and a generic health-check/incident cookbook |
+| [deployment/mesh/README.md](deployment/mesh/README.md) | VM mesh adapter: inventory, WireGuard/Caddy bootstrap, serial rollout, rollback and cutover |
 
 For a Fly health check, read `OPERATIONS.md` first and then follow the cookbook
 in `deployment/fly/README.md`. Health checks are read-only: do not deploy,

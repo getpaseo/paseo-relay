@@ -967,3 +967,53 @@
   test "a real unread fanout peer reaches its send deadline without delaying
   healthy order" sits near its 45 s timeout on a heavily loaded host: in an
   interleaved A/B it passed 3/3 with this change and 2/3 without it.
+
+## Portable VM mesh adapter and static discovery
+
+- Red: `mix test test/paseo_relay/static_cluster_test.exs` started an isolated
+  real `:peer` over its standard-I/O control channel (not distribution), loaded
+  `PASEO_RELAY_CLUSTER_NODES`, and failed with `KeyError :cluster_nodes` before
+  implementation. Green: the configured peer connects without DNS, reconnects
+  after `Node.disconnect/1`, and ignores its own node name. Malformed names are
+  rejected at the configuration boundary; unset peers leave discovery disabled.
+- Red: the three-node Compose gate against the previous generic image never
+  reached its three-node readiness floor: that image ignored the static list.
+  With static discovery installed, the real cross-node WebSocket probe then
+  exposed a Caddy integration failure: lowercase `{rp.header.x-reroute-target}`
+  resolved to an empty target and the client upgrade received `502` (`dial tcp
+  :0`). Green uses Caddy's canonical `{rp.header.X-Reroute-Target}` response
+  placeholder. A daemon on A and client/data sockets on B exchange text and
+  binary frames; B records exactly two reroutes. Repeating C→A exercises every
+  node. The same Caddy proxy template is used for production rendering and CI.
+- Red: a real generic release with distribution fixed to port 9100 could not
+  execute its own release RPC: the helper VM inherited the occupied fixed port
+  and exited `register/listen error: eaddrinuse`. Green: the adapter's `rpc.sh`
+  retains the private distribution interface and gives only the temporary RPC
+  node an ephemeral port. The isolated real-container binding gate proves RPC,
+  drain begin/cancel, HTTP and distribution bound to the selected IP, fixed
+  relay distribution port 9100, and EPMD only on that IP plus OTP's loopback.
+- Render checks exercise the public command with temporary credentials: full
+  peer mesh, private listener/ownership settings, immutable image requirement,
+  restricted SSH firewall, secret file permissions, and duplicate-IP rejection.
+  Bash syntax and the Cloudflare-enabled Caddy build are also CI gates.
+- No cloud resource, Fly app, production DNS, certificate order, bootstrap host
+  or production session was touched. WireGuard transport, fresh Ubuntu
+  provisioning, real DNS-01 certificates, 12k-socket capacity, and SSH rollout
+  remain staging evidence, not claims from local Compose.
+- Multi-hostname cutover red: the rendering test supplied
+  `hostnames = ["relay-next.example.com", "relay.example.com"]`; the original
+  single-name boundary failed with missing `hostname`. Green renders both names
+  into the same Caddy site, validates a nonempty unique hostname list, and CI
+  provisions the DNS-01 configuration for both names with the real custom Caddy
+  image without starting listeners or ordering certificates. The runbook now
+  stages on `relay-next.paseo.sh`, pre-issues the production name the day before,
+  swaps the production CNAME, then stops all Fly Machines to force reconnect;
+  rollback reverses DNS and cuts mesh relay sockets only after Fly is ready.
+- Final local merge gate: `ERL_FLAGS='+S 8' scripts/ci.sh` exited zero with
+  124 tests passing, formatting and both compilation modes passing, a production
+  release, all Docker builds, existing Fly diagnostic/replay checks, both mesh
+  round trips (two reroutes each), private binding/RPC/drain checks, rendering
+  tests, Bash syntax and two-hostname DNS-01 configuration validation. One
+  earlier four-scheduler full run timed out in the existing strict byte-budget
+  test; both subsequent eight-scheduler full suites passed 124/124. No delivery
+  or Capacity implementation was changed for this adapter.

@@ -1,0 +1,27 @@
+services:
+  relay:
+    image: ${RELAY_IMAGE:?set immutable relay image}
+    network_mode: host
+    env_file: relay.env
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+  caddy:
+    image: ${CADDY_IMAGE:?set Cloudflare-enabled Caddy image}
+    network_mode: host
+    env_file: caddy.env
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

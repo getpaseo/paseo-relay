@@ -24,3 +24,7 @@ paseo_relay-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# Mesh render output and operator secrets.
+/deployment/mesh/generated/
+/deployment/mesh/secrets/

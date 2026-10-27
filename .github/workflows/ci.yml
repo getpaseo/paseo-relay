@@ -27,4 +27,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: scripts/ci.sh
+      # Includes the Fly release smoke and three-node Caddy mesh reroute probe.
+      - name: Tests, releases, adapters and cross-node WebSockets
+        run: scripts/ci.sh

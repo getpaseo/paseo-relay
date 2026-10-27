@@ -28,7 +28,8 @@ scripts/ci.sh
 release matrix, builds every Docker surface, boots the release and both relay
 containers through `/health` and `/ready`, restarts the generic artifact, and
 runs bounded real-WebSocket sustained, concurrent reconnect, and ownership smoke
-against the generic production image.
+against the generic production image. It also proves cross-node WebSocket reroutes
+through three real Caddy proxies and statically clustered generic relay nodes.
 
 See [LICENSE](LICENSE).
 
@@ -45,6 +46,7 @@ generic:
 | `PASEO_RELAY_OWNERSHIP_TARGET` | `local` | Opaque target advertised to other relay nodes. |
 | `PASEO_RELAY_REROUTE_HEADER` | `x-reroute-target` | Response header used by the deployment adapter. |
 | `PASEO_RELAY_CLUSTER_QUERY` | unset | Optional DNS query used to discover BEAM peers. |
+| `PASEO_RELAY_CLUSTER_NODES` | unset | Optional comma-separated `name@host` peers, connected at startup and retried every 5 seconds alongside DNS discovery. |
 | `PASEO_RELAY_MIN_CLUSTER_SIZE` | `1` | Minimum nodes required before accepting unowned sessions. |
 | `PASEO_RELAY_ACCEPTORS` | `100` | Listener acceptor processes. |
 | `PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR` | `200` | Capacity factor multiplied by the acceptor count to set the node-local active-WebSocket ceiling; the default is 20,000. |
@@ -129,6 +131,11 @@ the generic container with `docker build -t paseo-relay .`. The explicit
 provider adapter in [`deployment/fly`](deployment/fly) translates its platform
 node input into `RELEASE_NODE`; nothing under `lib/` or `scripts/` depends on it.
 
+| Adapter | Deployment contract |
+| --- | --- |
+| [Fly](deployment/fly/README.md) | DNS discovery and `fly-replay` on Fly Machines |
+| [VM mesh](deployment/mesh/README.md) | Static peers, WireGuard and Caddy replay on plain Ubuntu VMs |
+
 Cluster ownership uses [Syn](https://hexdocs.pm/syn/readme.html), an eventually
 consistent distributed process registry. A network partition can temporarily
 admit one owner for the same `serverId` on each side. When the registry
@@ -186,8 +193,10 @@ PASEO_OWNERSHIP_SURGE_COUNT=50000 mix test test/paseo_relay_test.exs
 ```
 
 A multi-node data test must run behind a deployment adapter capable of replaying
-the original WebSocket upgrade. The Fly adapter uses `fly-replay`; all load
-clients still use one public endpoint and the proxy performs node placement.
+the original WebSocket upgrade. The Fly adapter uses `fly-replay`; the mesh
+adapter intercepts `409` with Caddy. Run `deployment/mesh/e2e/run.sh` for the
+local three-node proof. Load clients still use one public endpoint and the proxy
+performs node placement.
 
 Capacity tests need an appropriate file-descriptor limit and kernel socket
 budget. The ownership scenario opens one real daemon-control WebSocket for each
