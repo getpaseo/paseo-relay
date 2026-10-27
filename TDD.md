@@ -2,7 +2,234 @@
 
 ## Native Cowboy delivery and admission reshape
 
+- Red: the standard WebSock boundary could not suspend TCP reads while keeping
+  the same WebSocket process available for outbound frames. The first
+  bidirectional pressure test deadlocked both directions, and the initial fix
+  required local patches in two server dependencies.
+- Green: the relay now implements Cowboy's native `:cowboy_websocket` behavior.
+  `{active, false}` suspends source reads while `websocket_info/2` continues
+  outbound delivery; `{active, true}` rearms reads only after the destination's
+  synchronous HTTP/1 write barrier. The local dependency patches and their
+  verification machinery are deleted.
+- Full-duplex evidence: a real daemon-data WebSocket is held under sustained
+  fanout pressure by an unread client. While Cowboy keeps that daemon's source
+  reads passive, a healthy client sends reverse traffic through the daemon's
+  Writer and the same raw daemon socket receives it before pressure is released.
+- Buffered input evidence: the production handler charges every completed
+  message callback against one global weighted byte budget before delivery. A
+  real TCP test sends three frames in one write, observes that Cowboy's
+  one-message activation reserves exactly one delivery at a time, attaches the
+  destination, and receives all three in order as reads are rearmed. A separate
+  five-source test fills the weighted budget with four complete maximum
+  messages and proves the fifth closes with `1013 Relay ingress capacity`
+  without crossing the cap.
+- Protocol evidence: the first raw-TCP red declared a masked payload one byte
+  above the legal `32 MiB - 14 bytes` maximum. Cowboy accepted it because the
+  initial reshape confused Cowboy's payload limit with the existing 32 MiB wire
+  limit. The corrected limit delivers the exact maximum as both unfragmented
+  and fragmented binary messages, permits interleaved ping/pong, and closes one
+  byte more with `1009`; the relay ingress reservation remains zero.
+- Red: with the watermark forced below current BEAM memory, an admitted raw
+  socket retained a 1 MiB non-final fragment outside the completed-message
+  budget and remained open because the pressure authority tracked only blocked
+  deliveries. Green: pressure now monitors every admitted socket, prioritizes
+  blocked delivery sources, and otherwise sheds the oldest active socket. The
+  same incomplete-fragment peer receives `1013 Relay memory pressure`, active
+  WebSockets return to baseline, and ingress reservations remain unchanged.
+- Outbound-boundary audit: a red metric assertion showed that the compatible
+  JSON pong was the last application frame returned directly from Cowboy: the
+  peer received it, but `frames_forwarded` did not advance. Control input now
+  asks the session Owner for its attached Writer, and that Writer performs the
+  bounded send and barrier; the focused test observes one forwarded frame and
+  its exact encoded byte count.
+- Configuration evidence: listener, delivery, transport, control queue, attach,
+  budget, heap, and watermark settings are validated once into a single config
+  struct. Validation requires `delivery_timeout_ms < transport_send_timeout_ms`
+  so application shedding is recorded before the transport fallback. The final
+  standards audit removed the Listener's fallback read of application globals
+  and the application's duplicated listener option projection; startup now
+  passes the one validated config struct as the sole production shape.
+- Admission restart evidence: killing the ingress-budget process initially left
+  an existing real Cowboy socket open with reservations erased. Sockets now
+  monitor that process and close with `1013 Relay ingress capacity unavailable`;
+  the supervised replacement admits a new real WebSocket at the zero baseline.
+- Heap-fuse lifecycle evidence: a real Cowboy socket was killed while unmasking
+  a payload under a deliberately low heap limit. Before the fix, the externally
+  monitored capacity slot returned to zero while `active_websockets` remained
+  stuck at one because `Socket.terminate/3` never ran. The gauge now reads the
+  connection-budget monitor's attached-socket state, so both capacity and the
+  public metric reconcile after forced termination and after budget restart.
+- Cleanup evidence: full-suite seed `441893` exposed that killing the WebSockex
+  test client could leave Cowboy passive until the kernel close became visible,
+  cascading a non-zero active-socket gauge into later tests. Test teardown now
+  uses the public WebSocket close behavior and waits for the close handshake.
+  A later seed-1 red found the same kill-based cleanup in the protocol fixture:
+  one active socket survived its five-second assertion window and caused 27
+  subsequent zero-baseline failures. That fixture now uses the same synchronous
+  public close path. Seed `441893` then exposed a separate raw-TCP integration
+  fixture that closed its transport without a WebSocket close frame and did not
+  wait for Cowboy termination. It now sends a masked close frame and observes
+  the active-socket gauge return to its exact baseline. A subsequent seed-1 run
+  found one behavior test still killing a client process to trigger detach; it
+  now triggers the same detach through the peer's public close handshake. The
+  protocol fixture also uses a unique session ID per test rather than assuming
+  an ephemeral listener port cannot be reused during the Owner idle grace.
+- Late-upgrade cleanup evidence: full-suite seed 1 found that the load client's
+  deliberately delayed sibling could return from its real Cowboy handler after
+  the test's instantaneous zero check. The fixture now monitors that actual
+  connection process through termination before checking the public active
+  metric, preventing a late upgrade from escaping into the next test module.
+- Attach-before-detach evidence: WebSockex reports its open callback after HTTP
+  101, which can precede Cowboy's `websocket_init`. A last-client test could
+  therefore race data-socket reservation attachment and correctly receive the
+  initialization fail-close instead of the intended detach close. The test now
+  relays a frame from data to client first, proving public attachment before it
+  triggers and asserts last-client cleanup.
+- Destination-death fixture evidence: repeated seed `441893` reproduced a peer
+  transport closing before its explicit `1012`/`1013` frame. The test closed the
+  destination as soon as one of five multi-megabyte sources reached the handler, leaving
+  other client payloads unread at Cowboy's transport boundary. The fixture now
+  first observes all five complete-message callbacks and real downstream
+  backpressure, then kills the destination and requires an explicit close from
+  every source.
+- Multi-node evidence: a real server-data WebSocket owns a session on one peer;
+  a client upgrade first lands on a disjoint peer, receives the Syn owner's
+  opaque `409` reroute target, then replays to the owner and exchanges ordered
+  text and binary frames in both directions. Relay payloads remain local to the
+  owner node.
+- Native Cowboy black-box stress evidence, all with zero loss, reordering,
+  send, connection, and cleanup failures:
+  - High-rate: 200 pairs sent and received 574,800 ordered 1 KiB frames in 30
+    seconds at 19,159 steady-state frames/s; p99 latency was 9 ms and relay peak
+    RSS was 209,076,224 bytes.
+  - Reconnect: 500 pairs completed ten reconnect cycles, 11,001 cumulative
+    successful WebSockets, and 20,000 ordered frames; relay peak RSS was
+    326,402,048 bytes.
+  - Capacity: 15,000 distinct real WebSockets connected successfully in 2.868
+    seconds; relay peak RSS was 1,300,512,768 bytes and every connection cleaned
+    up. This replaces the pre-Cowboy 642 MB capacity measurement.
+  - Large frame: two bidirectional bursts transferred four near-maximum legal
+    frames, 134,217,292 payload bytes total, without loss or reordering.
+  - Sustained plateau: 100 pairs sent and received 1,178,000 ordered 4 KiB
+    frames over five minutes, 4,855,494,600 bytes in each direction. Relay peak
+    RSS was 196,116,480 bytes, final loaded RSS was 123,551,744 bytes, and RSS
+    after socket cleanup was 114,491,392 bytes. The final BEAM total and binary
+    memory readings after cleanup were 82,791,065 and 10,932,528 bytes;
+    `active_websockets`, ingress reservations, in-flight delivery, and
+    backpressured-source gauges all returned to zero.
+- Final native-Cowboy full-suite matrix, all 66 tests: seed 1 passed in 119.4
+  seconds, seed 441893 passed in 115.2 seconds, and seed 8191 passed in 114.4
+  seconds. Result: 198/198 across three complete seeded runs. The
+  destination-death case also passed 20 consecutive repetitions and the
+  attach-before-detach case passed 30 consecutive repetitions.
+- Final native-Cowboy gates: `mix format --check-formatted`, forced
+  `mix compile --warnings-as-errors`, `mix deps.unlock --check-unused`, and
+  `git diff --check` all exited zero. `MIX_ENV=prod mix release --overwrite`
+  assembled `paseo_relay-0.1.0`; the release was not started or deployed.
+- Completion gate after the all-socket pressure and externally-owned gauge
+  fixes: the complete suite passed 68/68 in 99.4 seconds. Warnings-as-errors
+  test and production compilation, formatting, lock validation, release build,
+  and a live release `/health` + `/ready` smoke all passed. A production-release
+  load smoke completed 1,950/1,950 sustained frames, 151 reconnect-wave socket
+  opens, and 200/200 ownership sockets with zero connection, send, ordering, or
+  cleanup failures.
+- Hosted-CI red: the clean Ubuntu runner had no EPMD daemon, so the distributed
+  test bootstrap failed at `Node.start/2` before ExUnit ran. The test boundary
+  now starts the OTP-provided EPMD daemon explicitly before starting its named
+  node, matching the fresh-runner environment instead of depending on a daemon
+  left running by local development.
+- The same clean dependency fetch reported fixed memory-exhaustion advisories in
+  Cowboy 2.17 and Cowlib 2.18. The lock now resolves Cowboy 2.18, Cowlib 2.19,
+  and Ranch 2.2.1; `mix hex.audit` exits zero and is part of the mandatory CI
+  path. The two remaining ignored Cowlib advisories concern unused client-side
+  cookie encoding and invalid response-header construction rejected by Cowboy,
+  as documented beside the existing allowlist in `mix.exs`.
+- Second review-cycle red: a real v2 control socket accepted and decoded a
+  64 KiB+1 text message instead of rejecting it before JSON allocation. A real
+  Cowboy socket killed by its configured max-heap fuse during an active delivery
+  returned the active-WebSocket and ingress gauges to zero but permanently left
+  one backpressured source and seven in-flight bytes. Killing the old ingress
+  singleton also allowed its empty replacement to exist while old connections
+  were still closing.
+- Green: `PaseoRelay.Capacity` is now the single monitored ledger for connection
+  reservations, attached sockets, explicit per-message tokens, retained bytes,
+  delivery transitions, pressure order, and all four transient gauges. The
+  heap-fuse boundary returns every gauge to baseline without running
+  `Socket.terminate/3`. A 64 KiB Cowboy control ceiling returns `1009` before
+  parsing, while supported control messages enter the same ledger as data.
+  Capacity and the production Ranch listener run under `:rest_for_one`; a real
+  retained-payload restart test observes the old listener terminate before
+  replacement admission succeeds.
+- Hosted-CI red: the global-count reconnect assertion included unrelated Owners
+  that expired during its 1,000-server wave, and later peer tests could inherit a
+  changed node cookie. The test now preserves the cookie, checks every named
+  surge Owner through Syn on all three real nodes, and waits for the public
+  reroute result before attempting a disjoint-node WebSocket upgrade.
+- Final review red: a queued reservation-expiry message could remove a socket
+  after its reservation had already become active. A socket chosen for pressure
+  shedding could also admit or start pipelined messages before its asynchronous
+  close ran. A separate real-socket red proved one pressure check shed only one
+  of two sockets despite more than one maximum message of memory overshoot.
+  Expiry now applies only to reservation state, and shedding is a terminal
+  ledger state: both new admission and reserved-to-delivering transitions fail
+  closed with token cleanup and an orderly `1013`. Pressure checks shed a batch
+  proportional to current overshoot (capped at 64) and recheck after 100 ms while
+  pressure and eligible sockets remain.
+- The public heap-fuse regression establishes a real 8 MiB delivery to an unread
+  TCP destination, then sends a maximum legal frame in the reverse direction to
+  kill the actual Cowboy process. It passed four consecutive focused runs and
+  reconciled active sockets, retained bytes, in-flight bytes, and blocked sources
+  each time. The final local gate passed formatting, warnings-as-errors test
+  compilation, unused-lock validation, and all 73 tests in 101.2 seconds.
+- Clean Linux CI red completed 70/73: the large-frame full-duplex and heap tests
+  queued reverse sends behind an 8 MiB WebSockex receive, while the maximum-frame
+  digest callback missed its 15-second runner deadline. The runtime boundary was
+  healthy; the secondary client scheduling made the evidence platform-dependent.
+  The tests now wait for the healthy WebSockex peer to finish the forward frame
+  before sending reverse traffic, receive the maximum frame through the existing
+  raw WebSocket boundary, and use a bounded deadline while awaiting the real
+  max-heap transport close. All three focused tests passed four consecutive local
+  runs after the correction; the post-correction complete suite passed 73/73 in
+  97.5 seconds with formatting, warnings-as-errors compilation, and lock
+  validation green.
+- The next clean Linux run closed the unread-control test with `1012 Session
+  expired` before its target scenario: constructing 1,000 existing session
+  members first exhausted the five-second upgrade reservation under runner
+  scheduling. The test now establishes the unread control socket first and then
+  fills its real transport with the same notification wave, isolating bounded
+  Writer shedding from session-upgrade latency. The focused regression passed
+  four consecutive local runs, followed by a 73/73 complete-suite pass in 98.7
+  seconds.
+- A subsequent Linux red armed the one-byte watermark before its blocked source
+  existed; the periodic checker correctly shed the new active socket first, so
+  the test never observed one blocked source. Both blocked-delivery and retained-
+  fragment tests now prove their public precondition before enabling pressure and
+  invoking the explicit check. The focused pair passed four consecutive runs
+  without a timing sleep, followed by a 73/73 complete-suite pass in 98.6 seconds.
 ### Final standards architectural audit
+
+- Dependency and transport boundary: the vendored Bandit and Thousand Island
+  trees, patch verifier, Plug router, and custom WebSock returns are gone. The
+  only server path is public Cowboy/Ranch HTTP/1 with native active-mode flow
+  control.
+- Protocol and admission boundary: the 32 MiB masked data ceiling and 64 KiB
+  inbound-control ceiling are derived in one protocol module. One capacity
+  ledger owns connection and message admission, delivery state, pressure order,
+  and computed gauges; its socket monitors reconcile forced exits. Ledger loss
+  stops every production listener connection before a fresh epoch admits work.
+- Session and distribution boundary: Owner remains the only session topology
+  authority, Syn stores only `serverId` ownership metadata, and the disjoint-node
+  test proves reroute before payload exchange. No payload path uses OTP
+  distribution or a node-wide Registry.
+- Delivery boundary: Writer is the sole application-frame sender, including
+  JSON pong and Owner notifications. Its payload waiters contain metadata only;
+  completed payload references remain in their tokenized source/task owners, and
+  its control payload queue has an explicit byte cap. Writer, Owner, connection
+  Owner and capacity-ledger death all fail sockets closed.
+- Unavailable public boundary: Cowboy does not expose pre-payload admission or
+  a fixed first-fragment-to-completion deadline. The implementation and tests do
+  not claim either guarantee; incomplete assembly remains under Cowboy's size
+  limit, the heap fuse, and optional memory watermark.
 
 ## v1 pairing
 
@@ -54,14 +281,10 @@
 - Red: a 257-byte `serverId` completed a `101 Switching Protocols` response and claimed distributed ownership.
 - Green: identifiers longer than 256 bytes now receive `400` before ownership, while empty client connection IDs retain the compatible generated-ID behavior.
 
-## sharded load generation
-
 - Red: a real black-box run requesting `--no-control` still opened five WebSockets for two pairs because every load process unconditionally opened its own daemon control socket.
 - Green: sharded runs can omit that single shared socket and use an explicit connection-ID prefix. A real WebSocket test verifies four data sockets, bidirectional frames, and clean shutdown without importing relay internals.
 - Red: the same real-server test had no keepalive accounting when a keepalive interval was requested.
 - Green: every open test socket can now send a small, separately-counted keepalive frame during long ramps; timers are cleared on close and finalization.
-
-## Relay parity hardening (`6dbe13c`)
 
 ### Reject invalid upgrades before ownership
 
@@ -141,10 +364,18 @@
   `Ownership.route/2`; the same real TCP request returns `426` and ownership
   remains `:undefined`.
 
-## Ownership surge and bounded admission
-
 ### Replace synchronous global ownership
 
+- Red: the production-shaped three-node `:global` path returned `503 owner` for
+  a 500-session reconnect surge. Locally, 10,000 distinct ownership claims took
+  roughly 14.6 seconds. Removing the redundant transaction and `global.sync/0`
+  still took roughly 13 seconds because `global.register_name/2` is itself a
+  synchronous cluster-wide registration.
+- Green: ownership now uses Syn's strict distributed registry and advertises the
+  opaque reroute target as registration metadata. A real three-node BEAM test
+  covers concurrent conflicts, convergence, owner loss, remote takeover, and
+  distinct-server surges. The same local machine completed 10,000 claims in
+  roughly 200 milliseconds and 50,000 in roughly 1.17 seconds.
 ### Exercise ownership through real WebSockets
 
 - Red: the black-box load client rejected `--scenario ownership`; it could only
@@ -211,8 +442,6 @@
   convergence, and cross-node route sampling complete in roughly 1.5 seconds on
   the local test cluster.
 
-### Keep production capacity inside the measured memory envelope
-
 ## Deterministic full-suite ownership teardown
 
 - Red: an independent `asdf exec mix test --seed 268085` completed 57/58. In
@@ -249,6 +478,129 @@
   `paseo_relay-0.1.0` successfully. The release was not started or deployed.
 
 ## Final admission, deadline, and pressure boundaries
+
+- HTTP lease red/green: with one Ranch connection slot, a `POST /health` that
+  declared but withheld its body kept the next health request blocked when the
+  protocol idle timeout was infinite. A finite pre-upgrade HTTP idle timeout now
+  releases that slot, while a real upgraded WebSocket remains alive beyond the
+  same interval and answers ping with pong.
+- Ownership admission red/green: a valid upgrade rejected at the WebSocket
+  ceiling previously created an Owner before admission and left its `serverId`
+  registered during the grace period. Local capacity is now leased before
+  reserving or creating an Owner, and a real rejected upgrade leaves its unique
+  `serverId` unowned. A second red showed that admitting before even looking up
+  ownership made a full landing node return `503` for a healthy remote session;
+  known remote owners now retain their `409` reroute path without consuming a
+  local slot.
+- Absolute deadline red/green: suspending an alive, fully attached Owner made a
+  real source delivery wait forever before the Writer deadline began. The source
+  now carries one deadline through Owner lookup, data attachment, Writer
+  reservation, and the transport write barrier; the real source closes with
+  `1013 Delivery unavailable` and every capacity gauge returns to zero.
+- Accepted-control red/green: an accepted control notification queued behind a
+  blocked Writer could expire and disappear while its socket stayed healthy.
+  Controlled Writer and Cowboy scheduling over a real control WebSocket now
+  proves the accepted notification is either written before its deadline or
+  closes the destination with `1013 Slow consumer`.
+- Measured-pressure red/green: after older idle sockets and newer real sockets
+  retained incomplete 8 MiB fragments, the previous one-shot estimate admitted
+  replacement work before demonstrating relief. A pressure episode now rejects
+  new upgrades, prioritizes known blocked deliveries, conservatively chooses
+  newest unclassified sockets, and repeats bounded batches based on measured
+  BEAM memory until hysteresis recovery. The fragment source closes with `1013`,
+  an older idle socket remains responsive, and admission reopens only after
+  measured relief.
+- Clean-runner budget fixture: hosted seed `804904` exposed a test-only
+  serialization: four independent maximum-message sources shared one absolute
+  deadline, but the fixture attached and awaited each 32 MiB destination before
+  opening the next. The first 15-second digest wait expired on the loaded runner
+  even though the exact test and seed passed locally. The boundary now attaches
+  all four destinations before awaiting their digests, matching the concurrent
+  node-budget behavior under test. The exact 25-test backpressure module passed,
+  followed by three isolated passes of the corrected budget regression.
+- Post-barrier source-death red/green: killing the real source process after its
+  Writer had emitted a frame and barrier immediately granted a queued successor;
+  the destination mailbox received a second payload while the first send was
+  still unacknowledged. Writer now distinguishes an unused reservation from an
+  emitted write: source death before emission may advance the queue, while
+  source death behind a barrier sends retryable `1013`, rejects all queued work,
+  and stops. The exact Writer invariant and a real pressure-cancellation socket
+  path passed four consecutive focused runs, the backpressure module passed
+  27/27 at seed `804904`, and the complete local suite passed 80/80 at that seed.
+- Stalled-authority red/green: suspending a live Owner through the public socket
+  path previously timed out its caller but left the Owner registered and able to
+  accumulate queued requests. The timeout now kills that Owner, both sockets
+  fail closed, and Syn reaches `:unowned`. Separately, suspending Capacity made
+  `/metrics` perform four sequential five-second calls; one snapshot call now
+  returns all four transient gauges or one bounded fallback. Both public fault
+  tests passed four consecutive focused runs.
+- Control-ping authority red/green: a real v2 control ping against a suspended
+  Owner made the bounded call return bare `:closed`; the unmatched result raised
+  `CaseClauseError` and the peer observed abnormal `1011`. Timed-out Owner calls
+  now retire the stalled authority, and the control socket converts `:closed`
+  into explicit retryable `1013 Delivery unavailable`. The exact public
+  regression passed four consecutive runs, followed by the complete 82/82 suite
+  at seed `804904`.
+- Operational-control finality red/green: with Capacity suspended,
+  `set_watermark/2` returned `{:error, :unavailable}` after five seconds but the
+  same exact Capacity PID remained alive beyond the two-second `DOWN` assertion;
+  resuming it would apply the queued watermark change. The control now uses the
+  same captured-PID mutation primitive as public decisions. The corrected test
+  receives `DOWN ... :killed`, observes a distinct replacement Capacity with
+  open admission, and therefore proves the failed control cannot later alter a
+  surviving epoch. The controls remain explicit because replacing these
+  test-used exports would require a new test-only authority.
+- Holder-lifetime red/green: the original stalled-disconnect boundary admitted
+  a dead request after resume and raised its public namespace count to one.
+  Admission now monitors the persistent Cowboy connection PID carried in the
+  request from the first reservation; `websocket_init` may attach only from that
+  same PID and reuses the monitor. A disconnected queued caller leaves no
+  reservation, and a real replacement upgrade succeeds immediately. The
+  five-second attachment lease remains only for a live holder that never
+  attaches. Explicit release/finish/cancel are idempotent cleanup; monitor
+  `DOWN` remains sufficient.
+- Readiness red: with admission state ignored, both a listener at its actual
+  application WebSocket ceiling and an active real pressure episode returned
+  `HTTP/1.1 200 OK` with `{"status":"ready"}`. A stalled ledger also returned
+  bounded `503` only after adding an availability lookup, while its metrics
+  response fabricated all four Capacity gauges as zero.
+- Razor-16 deletion green: the evaluator and its fixture API are deleted. The
+  gate creates an explicit persistent operator artifact directory first.
+  Malformed, zero, and privileged port bases now exit 2 with a parseable stdout
+  result identical to retained `summary.json`; timing edge checks retain the
+  same artifact. Live runs retain unchanged load JSON, bounded redacted stderr,
+  child statuses, diagnostics, ownership, timing, metrics/readiness, and cgroup
+  peak reset/read evidence. The summary only indexes those files and key
+  expected/actual checks. Sustained validation requires requested steady
+  duration and a duration-derived all-socket frame floor with a conservative
+  two-tick allowance. The non-destructive shell contract, including a broken
+  `jq` executable fallback, passed 4/4.
+- Razor-16 suite-load synchronization: seed `818179` had timed out inside the
+  default 30-second initial-sync receive of a test tagged for 15 seconds. The
+  corrected exact test passed ten consecutive runs. The fixture now
+  uses successful receipt of the public sync frame as its setup barrier, bounded
+  by the same explicit three-second transport deadline configured on its Cowboy
+  listener. Only then does it discover the Writer for fault injection; it does
+  not increase the overall test timeout or add a sleep/retry.
+- Hosted-CI fixture red: run `30714599694` (seed `441625`, `max_cases: 8`)
+  observed the first pressure close but timed out reading the second socket after
+  two seconds, and separately timed out after fifteen seconds waiting for the
+  fragmented 32 MiB digest despite an empty test mailbox.
+- Hosted-CI fixture green: the pressure test now observes both live admissions
+  before its single pressure check and zero active WebSockets before inspecting
+  the two buffered close frames. The fragmented test observes both public
+  endpoints attached before sending and bounds digest receipt by the configured
+  35-second transport-send contract. Each exact regression passed 10/10; both
+  full files passed twice, and the complete 95-test suite passed at seeds
+  `441625`, `804904`, and `818179` with `max_cases: 8`.
+- Exact-image RPC green: the executable validator accepts one bounded JSON line
+  amid launcher noise, validates the real `#PID<n.n.n>` representation and all
+  prior identity/config/ownership fields, and reports exact field mismatches.
+  The focused diagnostic boundary passed 2/2.
+- Green: the same real local-relay test now uses a 128-bit per-invocation
+  identifier, closes data before client before control, and leaves zero active
+  WebSockets after three probes. A failed-upgrade regression also reports the
+  socket role and reason instead of a `MatchError`.
 
 ## Validate client X25519 handshake inputs
 
@@ -324,8 +676,6 @@
   test "a real unread fanout peer reaches its send deadline without delaying
   healthy order" sits near its 45 s timeout on a heavily loaded host: in an
   interleaved A/B it passed 3/3 with this change and 2/3 without it.
-
-
 
 ## Static peer discovery
 
