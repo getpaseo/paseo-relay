@@ -3,5 +3,4 @@ deps
 .git
 test
 scripts
-!scripts/relay-load.mjs
 README.md

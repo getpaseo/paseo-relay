@@ -1,30 +1,59 @@
 name: CI
-
 on:
   pull_request:
   push:
     branches: [main]
-
+    tags: ['v*']
 permissions:
   contents: read
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   verify:
-    name: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
           otp-version: 29.0.2
           elixir-version: 1.20.2
-      - uses: actions/setup-node@v4
+      - name: Tests, production release and generic image
+        run: scripts/ci.sh
+  publish:
+    needs: verify
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
         with:
-          node-version: 22
-      - run: scripts/ci.sh
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/getpaseo/paseo-relay
+          tags: |
+            type=raw,value=sha-${{ github.event.pull_request.head.sha || github.sha }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=tag
+          flavor: latest=false
+      - uses: docker/build-push-action@v6
+        id: image
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Record immutable image reference
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: echo "ghcr.io/getpaseo/paseo-relay@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
