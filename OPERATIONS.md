@@ -137,6 +137,29 @@ with room for the configured ingress budget and VM overhead.
   deadline closes the source and forcibly retires the timed-out Owner. Syn
   removes its registration, so reconnect can claim a fresh Owner instead of
   adding work to an indefinitely stalled session authority.
+- **A peer closes right after its last messages:** Cowboy parses a Close that
+  arrives in the same read as earlier messages without returning to the socket,
+  so those messages can still be in flight or queued in source order. On a
+  normal remote Close, empty or coded, the source keeps its Owner attachment,
+  connection slot, and message tokens and delivers them in order to the
+  destinations that can still receive them before it detaches. Any v2 counterpart
+  Close that the detach causes (`1012` to clients, `1001` to the daemon data
+  socket after the last client) therefore follows them; v1 has no counterpart
+  Close.
+
+  Queued messages start only while one shared `PASEO_RELAY_DELIVERY_TIMEOUT_MS`
+  deadline has time left. It starts when termination begins, after Cowboy has
+  answered the Close. Each delivery then ends at its own deadline exactly as on an
+  open socket, so a stalled Owner is still retired and a slow destination still
+  shed. A `Capacity.start_delivery` call begun before the deadline keeps its own
+  configured timeout and can extend the source's lifetime by at most one mutation
+  window, whether it succeeds late or times out and restarts the ledger. The drain
+  stops at the first failed delivery and on memory pressure, a relay-initiated
+  close, or Owner, Writer, or connection-budget death; remaining messages are
+  dropped as before. Those notifications wait while a Capacity call is in
+  progress. Abnormal exits do not drain, and listener shutdown interrupts a drain
+  in progress. While draining, the source's own outbound traffic is not serviced
+  because Cowboy has already answered the Close.
 - **A control destination stops reading:** all control notifications use that
   destination's Writer. Once its bounded control queue fills, the control socket
   receives retryable `1013`; an accepted queued notification that reaches its

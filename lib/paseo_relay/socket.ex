@@ -166,7 +166,9 @@ defmodule PaseoRelay.Socket do
   def websocket_info(_message, state), do: {[], state}
 
   @impl true
-  def terminate(_reason, _request, %{owner: owner} = state) do
+  def terminate(reason, _request, %{owner: owner} = state) do
+    state = drain_before_detach(reason, state)
+
     if delivery = state[:delivery] do
       stop_delivery_task(delivery)
       PaseoRelay.Capacity.cancel_message(delivery.token)
@@ -177,6 +179,70 @@ defmodule PaseoRelay.Socket do
   end
 
   def terminate(_reason, _request, _state), do: :ok
+
+  # A peer may send its last messages and its Close in one write. Cowboy parses that
+  # Close and terminates without returning to this process, so the messages are
+  # still in flight or pending. On a normal remote Close, deliver them in order
+  # before detaching. Queued messages start only before one shared deadline; like an
+  # open socket, the drain then waits for each delivery to end at its own deadline
+  # instead of cancelling it, so Owner retirement and Writer shedding still happen.
+  # Stop at the first failed delivery and on any event that would already close this
+  # socket abnormally. Cowboy has answered the Close, so this socket's own outbound
+  # traffic is not serviced.
+  defp drain_before_detach(:remote, state), do: drain_on_close(state)
+  defp drain_before_detach({:remote, _code, _payload}, state), do: drain_on_close(state)
+  defp drain_before_detach(_reason, state), do: state
+
+  defp drain_on_close(state) do
+    drain(state, Deadline.after_ms(state.config.delivery_timeout_ms))
+  end
+
+  defp drain(%{delivery: %{ref: reference}} = state, deadline) do
+    owner_ref = state[:owner_ref]
+    writer_ref = state[:writer_ref]
+    budget_ref = admission_monitor(state.admission)
+
+    receive do
+      {^reference, :ok} ->
+        Process.demonitor(reference, [:flush])
+        state |> finish_delivery() |> drain_next(deadline)
+
+      {^reference, _error} ->
+        Process.demonitor(reference, [:flush])
+        finish_delivery(state)
+
+      {:DOWN, ^reference, :process, _pid, _reason} ->
+        finish_delivery(state)
+
+      :relay_memory_pressure ->
+        state
+
+      {:relay_close, _code, _reason} ->
+        state
+
+      {:DOWN, ^owner_ref, :process, _owner, _reason} ->
+        state
+
+      {:DOWN, ^writer_ref, :process, _writer, _reason} ->
+        state
+
+      {:DOWN, ^budget_ref, :process, _budget, _reason} ->
+        state
+    end
+  end
+
+  defp drain(state, deadline), do: drain_next(state, deadline)
+
+  defp drain_next(state, deadline) do
+    with {{:value, {opcode, payload, token}}, pending} <- :queue.out(state.pending),
+         true <- Deadline.remaining(deadline) > 0,
+         {:ok, state} <-
+           start_delivery(opcode, payload, token, %{state | pending: pending}, deadline) do
+      drain(state, deadline)
+    else
+      _stop -> state
+    end
+  end
 
   defp admit_input(opcode, payload, token, %{connection: %{role: :client}} = state) do
     case HandshakeValidation.check(opcode, payload) do
@@ -209,12 +275,20 @@ defmodule PaseoRelay.Socket do
     end
   end
 
-  defp start_delivery(opcode, payload, token, state) do
+  # The Capacity call always keeps its configured timeout: an expiry kills the ledger.
+  # A close drain passes its own deadline so every delivery shares one bound.
+  defp start_delivery(opcode, payload, token, state, drain_deadline \\ nil) do
     case PaseoRelay.Capacity.start_delivery(token, state.config.capacity_mutation_timeout_ms) do
       :ok ->
         source = self()
-        deadline = Deadline.after_ms(state.config.delivery_timeout_ms)
-        task = Task.async(fn -> deliver_input(payload, opcode, state, source, deadline) end)
+        deadline = drain_deadline || Deadline.after_ms(state.config.delivery_timeout_ms)
+        owner = state.owner
+        attach_timeout = state.config.data_attach_timeout_ms
+
+        task =
+          Task.async(fn ->
+            deliver_input(payload, opcode, owner, attach_timeout, source, deadline)
+          end)
 
         delivery = %{
           ref: task.ref,
@@ -245,10 +319,9 @@ defmodule PaseoRelay.Socket do
     end
   end
 
-  defp deliver_input(payload, opcode, state, source, deadline) do
-    attach_timeout = state.config.data_attach_timeout_ms
-
-    case Owner.destinations(state.owner, source, deadline, attach_timeout) do
+  # Takes only what it needs so a task does not copy this socket's pending queue.
+  defp deliver_input(payload, opcode, owner, attach_timeout, source, deadline) do
+    case Owner.destinations(owner, source, deadline, attach_timeout) do
       {:ok, destinations} -> Delivery.deliver(destinations, opcode, payload, deadline)
       {:error, :attach_timeout} -> {:error, :attach_timeout}
       {:error, _reason} -> {:error, :delivery_unavailable}
@@ -341,6 +414,9 @@ defmodule PaseoRelay.Socket do
 
   defp admission_token(%{token: token}), do: token
   defp admission_token(token), do: token
+
+  defp admission_monitor(%{monitor: monitor}), do: monitor
+  defp admission_monitor(_token), do: nil
 
   defp websocket_options(%{version: 2, role: :server, connection_id: ""}) do
     websocket_options_with_limit(PaseoRelay.Protocol.maximum_control_payload_bytes())

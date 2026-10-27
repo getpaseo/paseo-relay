@@ -912,3 +912,58 @@
   test/paseo_relay/handshake_validation_test.exs test/relay_protocol_test.exs`
   passed 20/20 in 81.4 seconds. `asdf exec mix format`, `asdf exec mix compile
   --warnings-as-errors --force`, and `git diff --check` exited zero.
+
+## Deliver a closing peer's last messages before detach
+
+- Red: eight real-WebSocket regressions in `test/relay_backpressure_test.exs`
+  cover v1 and v2, a daemon or client source, and an empty or coded Close. Each
+  establishes a route, suspends the real Owner, and writes three messages plus a
+  Close in one TCP write. The source echoes the Close before Owner can route
+  anything. All eight failed: v2 destinations received the counterpart `1012` or
+  `1001` instead of the messages, and v1 destinations received nothing. Two
+  runs delivered the in-flight first message and lost the queued rest.
+- Cause: Cowboy keeps parsing data it has already read after `{active, false}`
+  and sends a Close straight to `terminate/3` without calling the handler.
+  `Socket.terminate/3` then killed the in-flight delivery task and discarded
+  `pending`, before casting `Owner.detach/2`.
+- Green: on `:remote` and `{:remote, code, payload}` termination, the socket waits
+  for its in-flight delivery and then delivers `pending` in order before releasing
+  its slot and detaching. Queued messages start only while one shared deadline,
+  `delivery_timeout_ms` from the start of termination, has time left. The in-flight
+  delivery keeps its earlier deadline. The drain stops at the first failed
+  delivery and on memory pressure, `relay_close`, or Owner, Writer, or budget
+  `DOWN`. Capacity mutations keep their configured timeout because an expiry kills
+  the ledger. Delivery tasks no longer capture the whole socket state, so they do
+  not copy the pending queue.
+- Review red: two independent reviews found that a drain-side timer at the shared
+  deadline could kill a queued delivery before its `Owner.destinations/4` timeout
+  retired a stalled Owner. "a queued delivery shares the close deadline and still
+  retires a stalled Owner" holds the first delivery at a real write barrier, stalls
+  Owner, and failed: Owner stayed alive. Green: the drain no longer times out a
+  delivery itself; like an open socket, it waits for the delivery to end at its own
+  deadline. That test reads the queued lookup's deadline from Owner's mailbox and
+  asserts it is the drain's, then suspends the delivery task past that deadline so
+  a drain-side timer would deterministically win the race, and asserts the task
+  survives and retires Owner.
+- Guards: "a close drain stops at the first failed delivery" traces the real Owner
+  and counts route lookups after `:erlang.trace_delivered/1`, asserting exactly one;
+  "a close drain behind a stalled Owner ends at the in-flight deadline and retires
+  it" asserts Owner death and a bounded source lifetime; "a queued delivery to a
+  stalled Writer still ends with the drain" blocks a queued reservation on a
+  suspended Writer, observes that reserve call in the Writer's mailbox, and asserts
+  the source still ends with Owner alive and transient gauges released, since the
+  drain has no timer of its own; "memory pressure interrupts a close drain" first proves the drain is
+  waiting on a route lookup, then asserts prompt source death without delivery.
+  Against the original socket, the first-failure guard passes (the old code also
+  made one lookup before dropping everything); the stalled-Owner, shared-deadline,
+  and pressure tests fail, because the old code neither retires the Owner nor keeps
+  a draining source alive.
+- Mutation checks against the green code: continuing after a failed delivery makes
+  the first-failure guard see 3 lookups instead of 1; giving each queued delivery a
+  fresh deadline puts the queued lookup's deadline 860 ms after the send against a
+  700 ms bound; restoring a drain-side timer fails "the drain cancelled a delivery
+  before it could retire Owner" on every run.
+- Gate: the thirteen focused tests passed on three random seeds. The unread-fanout
+  test "a real unread fanout peer reaches its send deadline without delaying
+  healthy order" sits near its 45 s timeout on a heavily loaded host: in an
+  interleaved A/B it passed 3/3 with this change and 2/3 without it.

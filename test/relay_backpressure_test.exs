@@ -1042,6 +1042,218 @@ defmodule PaseoRelay.BackpressureTest do
     await_metric(:active_websockets, &(&1 == active_baseline))
   end
 
+  # A peer may send its last messages and a Close in one TCP write. Cowboy parses the
+  # whole buffer, so the Close reaches termination while those messages are still
+  # being delivered or queued. Suspending the real Owner holds delivery open until
+  # the source has answered the Close, which makes that interleaving deterministic.
+  for version <- [2, 1], role <- [:server, :client], close <- [:coded, :empty] do
+    destination_role = if role == :server, do: :client, else: :server
+    close_frame = if close == :coded, do: Macro.escape({:close, 4401, "rejected"}), else: :close
+    # v2 detaches the counterpart; v1 has no counterpart Close.
+    counterpart_close = if version == 2, do: if(role == :server, do: 1012, else: 1001)
+
+    test "v#{version} #{role} messages coalesced with a #{close} Close are delivered before detach" do
+      version = unquote(version)
+      port = start_relay(delivery_timeout: 2_000, send_timeout: 3_000)
+      server_id = "close-drain-v#{version}-#{unquote(role)}-#{unquote(close)}-#{port}"
+      source = raw_connect(port, route_path(version, server_id, unquote(role)))
+      destination = raw_connect(port, route_path(version, server_id, unquote(destination_role)))
+      owner = await_attached(server_id, 2)
+      :ok = send_frame(source, :text, "ready")
+      assert {:text, "ready"} = recv_server_frame(destination, 5_000)
+
+      :ok = :sys.suspend(owner)
+      on_exit(fn -> if Process.alive?(owner), do: :sys.resume(owner) end)
+      frames = [{:text, "one"}, {:binary, "two"}, {:text, "three"}, unquote(close_frame)]
+      :ok = :gen_tcp.send(source, Enum.map(frames, &:cow_ws.masked_frame(&1, 0x11223344)))
+
+      # The source answers the Close before Owner can route any of the messages.
+      assert_close_echo(source)
+      :ok = :sys.resume(owner)
+
+      assert {:text, "one"} = recv_server_frame(destination, 5_000)
+      assert {:binary, "two"} = recv_server_frame(destination, 5_000)
+      assert {:text, "three"} = recv_server_frame(destination, 5_000)
+      assert_counterpart_close(destination, unquote(counterpart_close))
+    end
+  end
+
+  test "a close drain stops at the first failed delivery" do
+    port = start_relay(delivery_timeout: 2_000, data_attach_timeout: 100, send_timeout: 3_000)
+    server_id = "close-drain-failure-#{port}"
+    client = raw_connect(port, v2_path(server_id, "client", "shared"))
+    owner = await_attached(server_id, 1)
+    source = socket_pid(owner, :client)
+    source_monitor = Process.monitor(source)
+    :erlang.trace(owner, true, [:receive])
+    on_exit(fn -> if Process.alive?(owner), do: :erlang.trace(owner, false, [:receive]) end)
+    frames = [{:text, "one"}, {:text, "two"}, {:text, "three"}, {:close, 4000, "bye"}]
+    :ok = :gen_tcp.send(client, Enum.map(frames, &:cow_ws.masked_frame(&1, 0x11223344)))
+    assert_close_echo(client)
+
+    # "one" fails at the 100 ms attach timeout. A drain that kept going would ask Owner
+    # for a route once per queued message.
+    assert_receive {:DOWN, ^source_monitor, :process, ^source, _reason}, 1_000
+    :erlang.trace(owner, false, [:receive])
+    assert route_lookups(owner, source) == 1
+  end
+
+  test "a close drain behind a stalled Owner ends at the in-flight deadline and retires it" do
+    port = start_relay(delivery_timeout: 300, send_timeout: 1_000)
+    server_id = "close-drain-deadline-#{port}"
+    client = raw_connect(port, v2_path(server_id, "client", "shared"))
+    daemon = raw_connect(port, v2_path(server_id, "server", "shared"))
+    owner = await_attached(server_id, 2)
+    :ok = send_frame(client, :text, "ready")
+    assert {:text, "ready"} = recv_server_frame(daemon, 5_000)
+
+    source = socket_pid(owner, :client)
+    source_monitor = Process.monitor(source)
+    owner_monitor = Process.monitor(owner)
+    :ok = :sys.suspend(owner)
+    on_exit(fn -> if Process.alive?(owner), do: :sys.resume(owner) end)
+    frames = Enum.map(1..12, &{:text, "late-#{&1}"}) ++ [{:close, 4000, "bye"}]
+    started = System.monotonic_time(:millisecond)
+    :ok = :gen_tcp.send(client, Enum.map(frames, &:cow_ws.masked_frame(&1, 0x11223344)))
+
+    # Owner.destinations/4 retires an Owner whose call reaches its deadline. The drain
+    # must let that happen and then end, not wait for the queued messages.
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :killed}, 1_500
+    assert_receive {:DOWN, ^source_monitor, :process, ^source, _reason}, 1_500
+    assert System.monotonic_time(:millisecond) - started < 1_000
+  end
+
+  test "a queued delivery shares the close deadline and still retires a stalled Owner" do
+    port = start_relay(delivery_timeout: 600, send_timeout: 2_000)
+    server_id = "close-drain-shared-deadline-#{port}"
+    client = raw_connect(port, v2_path(server_id, "client", "shared"))
+    daemon = raw_connect(port, v2_path(server_id, "server", "shared"))
+    owner = await_attached(server_id, 2)
+    :ok = send_frame(client, :text, "ready")
+    assert {:text, "ready"} = recv_server_frame(daemon, 5_000)
+
+    source = socket_pid(owner, :client)
+    destination = socket_pid(owner, :server)
+    source_monitor = Process.monitor(source)
+    owner_monitor = Process.monitor(owner)
+
+    on_exit(fn ->
+      if Process.alive?(owner), do: :sys.resume(owner)
+      if Process.alive?(destination), do: :sys.resume(destination)
+    end)
+
+    # Hold the first delivery at the destination's write barrier, then stall Owner so
+    # the queued delivery's route lookup waits there.
+    :ok = :sys.suspend(destination)
+    frames = [{:text, "first"}, {:text, "queued"}, {:close, 4000, "bye"}]
+    started = System.monotonic_time(:millisecond)
+    :ok = :gen_tcp.send(client, Enum.map(frames, &:cow_ws.masked_frame(&1, 0x11223344)))
+    assert_close_echo(client)
+    await_mailbox(destination, &match?({:relay_write_barrier, _writer, _reference}, &1))
+    :ok = :sys.suspend(owner)
+    Process.sleep(250)
+    :ok = :sys.resume(destination)
+    assert {:text, "first"} = recv_server_frame(daemon, 2_000)
+    await_mailbox(owner, &match?({:"$gen_call", _from, {:destinations, ^source, _, _}}, &1))
+
+    # The queued lookup carries the drain's deadline, set when termination began just
+    # after the send above. A fresh per-message deadline would be at least 250 ms later.
+    {:messages, messages} = Process.info(owner, :messages)
+
+    [{task, deadline}] =
+      for {:"$gen_call", {task, _tag}, {:destinations, ^source, deadline, _}} <- messages,
+          do: {task, deadline}
+
+    assert deadline - started <= 600 + 100
+
+    # Hold the delivery task past the deadline. A drain that timed out deliveries
+    # itself would kill the task here, before it could retire the stalled Owner.
+    :erlang.suspend_process(task)
+    Process.sleep(max(deadline - System.monotonic_time(:millisecond), 0) + 150)
+    assert Process.alive?(task), "the drain cancelled a delivery before it could retire Owner"
+    :erlang.resume_process(task)
+
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :killed}, 1_500
+    assert_receive {:DOWN, ^source_monitor, :process, ^source, _reason}, 1_000
+    refute match?({:text, "queued"}, recv_server_frame(daemon, 500))
+  end
+
+  test "a queued delivery to a stalled Writer still ends with the drain" do
+    port = start_relay(delivery_timeout: 600, send_timeout: 2_000)
+    server_id = "close-drain-stalled-writer-#{port}"
+    client = raw_connect(port, v2_path(server_id, "client", "shared"))
+    daemon = raw_connect(port, v2_path(server_id, "server", "shared"))
+    owner = await_attached(server_id, 2)
+    :ok = send_frame(client, :text, "ready")
+    assert {:text, "ready"} = recv_server_frame(daemon, 5_000)
+
+    source = socket_pid(owner, :client)
+    destination = socket_pid(owner, :server)
+    writer = :sys.get_state(owner).sockets[destination].writer
+    source_monitor = Process.monitor(source)
+
+    on_exit(fn ->
+      for pid <- [owner, destination, writer], Process.alive?(pid), do: :sys.resume(pid)
+    end)
+
+    # Complete the first delivery, hold the queued lookup at Owner, stall the Writer,
+    # then release Owner so the queued reservation waits on the stalled Writer. The
+    # drain has no timer of its own; the reservation's deadline must end it while
+    # Owner stays healthy.
+    :ok = :sys.suspend(destination)
+    frames = [{:text, "first"}, {:text, "queued"}, {:close, 4000, "bye"}]
+    :ok = :gen_tcp.send(client, Enum.map(frames, &:cow_ws.masked_frame(&1, 0x11223344)))
+    assert_close_echo(client)
+    await_mailbox(destination, &match?({:relay_write_barrier, _writer, _reference}, &1))
+    :ok = :sys.suspend(owner)
+    :ok = :sys.resume(destination)
+    assert {:text, "first"} = recv_server_frame(daemon, 2_000)
+    await_mailbox(owner, &match?({:"$gen_call", _from, {:destinations, ^source, _, _}}, &1))
+    :ok = :sys.suspend(writer)
+    :ok = :sys.resume(owner)
+    await_mailbox(writer, &match?({:"$gen_call", _from, {:reserve, _, _}}, &1))
+
+    assert_receive {:DOWN, ^source_monitor, :process, ^source, _reason}, 1_500
+    assert Process.alive?(owner)
+    assert Process.alive?(writer)
+
+    await_transient_gauges(%{
+      active_websockets: 1,
+      backpressured_sources: 0,
+      inflight_delivery_bytes: 0,
+      ingress_reserved_bytes: 0
+    })
+
+    :ok = :sys.resume(writer)
+    refute match?({:text, "queued"}, recv_server_frame(daemon, 500))
+  end
+
+  test "memory pressure interrupts a close drain" do
+    port = start_relay(delivery_timeout: 5_000, send_timeout: 6_000)
+    server_id = "close-drain-pressure-#{port}"
+    client = raw_connect(port, v2_path(server_id, "client", "shared"))
+    daemon = raw_connect(port, v2_path(server_id, "server", "shared"))
+    owner = await_attached(server_id, 2)
+    :ok = send_frame(client, :text, "ready")
+    assert {:text, "ready"} = recv_server_frame(daemon, 5_000)
+
+    source = socket_pid(owner, :client)
+    source_monitor = Process.monitor(source)
+    :ok = :sys.suspend(owner)
+    on_exit(fn -> if Process.alive?(owner), do: :sys.resume(owner) end)
+    frames = [{:text, "one"}, {:text, "two"}, {:close, 4000, "bye"}]
+    :ok = :gen_tcp.send(client, Enum.map(frames, &:cow_ws.masked_frame(&1, 0x11223344)))
+    assert_close_echo(client)
+
+    # The drain is live: the source waits on its first route lookup with seconds left.
+    await_mailbox(owner, &match?({:"$gen_call", _from, {:destinations, ^source, _, _}}, &1))
+    assert Process.alive?(source)
+    send(source, :relay_memory_pressure)
+    assert_receive {:DOWN, ^source_monitor, :process, ^source, _reason}, 1_000
+    :ok = :sys.resume(owner)
+    refute match?({:text, _payload}, recv_server_frame(daemon, 500))
+  end
+
   defp start_relay(options \\ []) do
     port = available_port()
     reference = {:backpressure, System.unique_integer([:positive])}
@@ -1137,6 +1349,95 @@ defmodule PaseoRelay.BackpressureTest do
 
   defp v2_path(server_id, role, connection_id) do
     "/ws?serverId=#{server_id}&role=#{role}&v=2&connectionId=#{connection_id}"
+  end
+
+  defp route_path(1, server_id, role), do: "/ws?serverId=#{server_id}&role=#{role}"
+  defp route_path(2, server_id, role), do: v2_path(server_id, role, "shared")
+
+  # Cowboy answers an empty Close with an empty Close, which recv_server_frame/2
+  # cannot read once the server has closed the transport.
+  defp assert_close_echo(socket) do
+    assert {:ok, <<0x88, length>>} = :gen_tcp.recv(socket, 2, 2_000)
+    if length > 0, do: assert({:ok, _payload} = :gen_tcp.recv(socket, length, 2_000))
+  end
+
+  # HTTP 101 can precede Owner attachment, and v1 routes only to attached sockets.
+  defp await_attached(server_id, count) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    await_attached(server_id, count, deadline)
+  end
+
+  defp await_attached(server_id, count, deadline) do
+    owner = PaseoRelay.Ownership.owner_pid(server_id)
+
+    cond do
+      is_pid(owner) and map_size(:sys.get_state(owner).sockets) >= count ->
+        owner
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("#{server_id} never attached #{count} sockets")
+
+      true ->
+        Process.sleep(10)
+        await_attached(server_id, count, deadline)
+    end
+  end
+
+  defp await_mailbox(pid, predicate) do
+    deadline = System.monotonic_time(:millisecond) + 2_000
+    await_mailbox(pid, predicate, deadline)
+  end
+
+  defp await_mailbox(pid, predicate, deadline) do
+    {:messages, messages} = Process.info(pid, :messages)
+
+    cond do
+      Enum.any?(messages, predicate) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("#{inspect(pid)} never received the expected message")
+
+      true ->
+        Process.sleep(5)
+        await_mailbox(pid, predicate, deadline)
+    end
+  end
+
+  # Counts the route lookups a traced Owner received from one socket, after the
+  # runtime confirms every trace message for Owner has been delivered.
+  defp route_lookups(owner, socket) do
+    reference = :erlang.trace_delivered(owner)
+    assert_receive {:trace_delivered, ^owner, ^reference}, 2_000
+    count_route_lookups(owner, socket)
+  end
+
+  defp count_route_lookups(owner, socket) do
+    receive do
+      {:trace, ^owner, :receive, {:"$gen_call", _from, {:destinations, ^socket, _, _}}} ->
+        1 + count_route_lookups(owner, socket)
+
+      {:trace, ^owner, :receive, _message} ->
+        count_route_lookups(owner, socket)
+    after
+      0 -> 0
+    end
+  end
+
+  defp assert_counterpart_close(_socket, nil), do: :ok
+
+  defp assert_counterpart_close(socket, code) do
+    assert {:close, ^code, _reason} = recv_server_frame(socket, 5_000)
+  end
+
+  defp socket_pid(owner, role) do
+    {pid, _socket} =
+      owner
+      |> :sys.get_state()
+      |> Map.fetch!(:sockets)
+      |> Enum.find(fn {_pid, %{connection: connection}} -> connection.role == role end)
+
+    pid
   end
 
   defp recv_headers(socket, acc) do
