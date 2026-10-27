@@ -1044,3 +1044,16 @@
 - Green: give the argument-only RPC helper `/dev/null` as stdin. The same
   real-container test reaches its sentinel and passes the listener/RPC/drain
   checks (exit 0). No deployment-specific flags or Docker version dependency.
+
+## Mesh sizing evidence from the small-VM rehearsal (2026-10-27)
+
+- The 12,001-WebSocket attempt on a 2 GB host stopped at 8,401 admitted
+  sockets before publishing any sustained frames. The last complete sample
+  had 7,801 sockets, Caddy RSS 997 MiB, BEAM RSS 526 MiB, and only 22 MiB
+  available host memory; BEAM allocation remained below its 1.5 GiB watermark.
+  The host became unresponsive under memory pressure; no OOM kill was proved.
+- README and OPERATIONS now require subtracting measured Caddy peak RSS,
+  host overhead and safety headroom before selecting the BEAM watermark.
+  Production uses 8 GB nodes; the example 6 GiB watermark and that node size
+  remain subject to Vultr staging capacity certification. No ceiling or
+  runtime setting was changed in response to the failed small-host attempt.

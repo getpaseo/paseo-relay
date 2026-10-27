@@ -385,11 +385,24 @@ takeovers, and cluster peer count.
 ## VM mesh adapter
 
 [deployment/mesh/README.md](deployment/mesh/README.md) defines the Ubuntu,
-WireGuard and Caddy deployment. The application ceiling remains 20,000 active
-WebSockets per node; the sample 8 GiB VM selects a provisional 6 GiB BEAM memory
-watermark. Caddy and OS memory are outside that watermark. The 12k-socket
-staging gate must establish bounded combined RSS and zero rejections before
-production. Local cross-node CI does not certify VM capacity.
+WireGuard and Caddy deployment. **The production size is 8 GB per node.** Set
+the BEAM memory watermark only after subtracting Caddy's measured peak RSS at
+the planned ingress tunnel count, OS/WireGuard overhead and safety headroom
+from actual VM RAM. The watermark watches BEAM allocation, not combined node memory;
+Caddy retains memory even for tunnels whose relay owner is on another node.
+The sample 6 GiB watermark is unvalidated and must be lowered if that combined
+budget requires it.
+
+The small-VM rehearsal measured Caddy at 997 MiB RSS with 7,801 WebSockets
+(about 130 KiB per proxied socket) and BEAM at 526 MiB RSS. A 2 GB node became
+unresponsive under memory pressure at 8,401 admitted sockets; BEAM allocation
+was still below its 1.5 GiB watermark in the last complete sample. The 12k
+attempt failed before sustained publishing; no OOM kill was established.
+That configuration is unsuitable, and these measurements do not certify the
+8 GB size. The Vultr staging gate must demonstrate bounded combined
+Caddy/BEAM/host memory and zero failures at the target load before production.
+The 20,000-WebSocket application ceiling remains unchanged and is not a VM
+capacity claim.
 
 A non-owner returns one `409` and Caddy retries the unchanged upgrade directly
 on the advertised owner over WireGuard. An unreachable target fails before

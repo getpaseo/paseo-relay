@@ -5,9 +5,10 @@ and the **generic** relay image. No provider API or Fly service participates in
 this path. `inventory.toml` is the fleet boundary; provider, region and size are
 operator metadata, not commands. One node per region is the intended topology.
 
-Read [OPERATIONS.md](../../OPERATIONS.md) first. This adapter is proven locally;
-fresh-host bootstrap, DNS-01 issuance, regional latency, load capacity and cloud
-firewall behavior still require staging certification. Nothing in CI deploys.
+Read [OPERATIONS.md](../../OPERATIONS.md) first. Bootstrap, WireGuard, DNS-01,
+cross-region routing, the live Paseo workflow, rollout and rollback were
+rehearsed on three small Ubuntu VMs. Production capacity still requires the
+Vultr staging gate on the agreed 8 GB node size. Nothing in CI deploys.
 
 ## What a connection does
 
@@ -52,7 +53,7 @@ Each `[[nodes]]` row has:
 | `public_ip` | Stable IPv4 address, WireGuard peer endpoint and root SSH destination |
 | `wg_ip` | Unique host in `10.77.0.0/24`; routed as `/32`, no default route |
 | `wg_pubkey` | Unique public key matching this node's private key |
-| `memory_watermark_bytes` | Explicit BEAM watermark, selected from VM memory and staging evidence |
+| `memory_watermark_bytes` | BEAM watermark after subtracting Caddy peak RSS, host overhead and safety headroom from VM RAM; validate on staging |
 
 `[mesh]` sets the public `hostnames` list, `minimum_cluster_size`, fixed
 `distribution_port` (9100 in the sample), and `ssh_cidr`. SSH is allowed only
@@ -63,13 +64,28 @@ not by Erlang TLS. EPMD binds to `ERL_EPMD_ADDRESS` (OTP also permits loopback),
 and distribution binds with `inet_dist_use_interface` and one fixed port.
 The relay HTTP listener also binds only to its WireGuard address.
 
-The sample selects a 6 GiB watermark for an 8 GiB VM. That leaves room for the
-OS, Caddy, WireGuard and transient allocations; it is a **staging starting
-point**, not certification for 12k sockets. Application capacity stays at 20,000
-WebSockets (100 acceptors × 200); no Fly placement ceiling applies here. The
-existing 30s delivery and 35s transport send deadlines stay unchanged. Both
-containers have a 100,000 file-descriptor limit; each Caddy tunnel uses a client
-and an upstream socket.
+**Production uses 8 GB nodes.** Set the BEAM memory watermark from the whole
+node budget: subtract Caddy's measured peak RSS at the planned ingress tunnel
+count, OS/WireGuard overhead and safety headroom from actual VM RAM. Caddy
+retains memory for local and cross-node tunnels; a BEAM-only watermark does
+not bound combined node memory.
+
+The small-VM rehearsal measured Caddy at about 130 KiB RSS per proxied
+WebSocket: 997 MiB at 7,801 sockets, alongside BEAM RSS of 526 MiB. The 2 GB
+node became unresponsive under memory pressure at 8,401 admitted sockets,
+while BEAM allocated memory remained below its 1.5 GiB watermark in the last
+complete sample. The attempted 12k-socket run never reached sustained
+publishing. These measurements rule out that 2 GB configuration; they do not
+certify the 8 GB production size or establish a universal per-tunnel budget.
+
+The inventory's 6 GiB BEAM watermark is an unvalidated example. Lower it if
+subtracting the measured proxy and host shares leaves less RAM. The Vultr
+staging gate must validate the combined Caddy/BEAM/host budget at the target
+socket count, including cross-region reroutes, before production. Application
+capacity remains 20,000 WebSockets (100 acceptors × 200); that admission ceiling
+is not measured VM capacity. The 30s delivery and 35s transport send deadlines
+stay unchanged. Both containers have a 100,000 file-descriptor limit; each
+Caddy tunnel uses a client and an upstream socket.
 
 Create private operator directories (the default paths below are gitignored):
 
