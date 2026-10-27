@@ -685,3 +685,13 @@
   implementation. Green: the configured peer connects without DNS, reconnects
   after `Node.disconnect/1`, and ignores its own node name. Malformed names are
   rejected at the configuration boundary; unset peers leave discovery disabled.
+
+## Generic repository boundary verification
+
+- The retained application suite passed 106/106 in the matching Elixir/OTP
+  toolchain with a 100,000-descriptor limit. Dependency audit, formatting, test
+  and production warnings-as-errors compilation, unused-lock check and release
+  build passed. The generic image built and returned healthy/ready responses.
+- The first local minimal-container run exhausted its default descriptor limit
+  in the existing unread-control pressure fixture. Repeating with the documented
+  real-socket test budget passed; application and pressure-test code were unchanged.

@@ -122,7 +122,7 @@ Build a production release with `MIX_ENV=prod asdf exec mix release`, or build
 the generic container with `docker build -t paseo-relay .`.
 
 CI publishes `ghcr.io/getpaseo/paseo-relay` after successful verification on
-`main`, version tags, and same-repository pull requests. Main also updates
+`main`, tags, and same-repository pull requests. Main also updates
 `latest`; pull requests publish only `sha-<commit>` candidate tags. Pin consumers
 to the `sha256` digest reported in the publish job summary:
 
