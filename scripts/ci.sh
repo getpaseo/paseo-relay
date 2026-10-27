@@ -212,6 +212,8 @@ config = config.replace("@TLS@", "tls {\n dns cloudflare {env.CF_API_TOKEN}\n}")
 Path(sys.argv[1]).write_text(config)
 PYTHON
 # Provision validation only: no listener, DNS request, or certificate order.
-docker run --rm --env CF_API_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  --volume "${mesh_caddy_config}:/etc/caddy/Caddyfile:ro" \
-  "paseo-relay-ci-caddy:${run_id}" caddy adapt --config /etc/caddy/Caddyfile --validate >/dev/null
+for token in aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa cfut_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; do
+  docker run --rm --env "CF_API_TOKEN=$token" \
+    --volume "${mesh_caddy_config}:/etc/caddy/Caddyfile:ro" \
+    "paseo-relay-ci-caddy:${run_id}" caddy adapt --config /etc/caddy/Caddyfile --validate >/dev/null
+done

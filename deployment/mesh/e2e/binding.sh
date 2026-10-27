@@ -32,6 +32,13 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 "$ready" || { docker compose logs --tail 30 >&2; exit 1; }
+# deploy.sh streams its remote shell over SSH stdin. RPC must leave the next
+# shell command there, rather than forwarding it into the container.
+bash -se <<'REMOTE'
+bash rpc.sh 'PaseoRelay.Drain.cancel()'
+touch rpc-returned
+REMOTE
+[[ -f rpc-returned ]] || { echo 'RPC consumed the remote deployment script' >&2; exit 1; }
 bash rpc.sh 'PaseoRelay.Drain.begin(); unless PaseoRelay.Drain.draining?(), do: raise("drain failed"); PaseoRelay.Drain.cancel()'
 docker compose exec -T relay cat /proc/net/tcp > sockets
 python3 - <<'PY'

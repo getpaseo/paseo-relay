@@ -6,4 +6,4 @@ cd "$(dirname "$0")"
 source node.conf
 exec docker compose exec -T \
   -e "ERL_AFLAGS=-kernel inet_dist_use_interface '{${WG_IP//./,}}'" \
-  relay /app/bin/paseo_relay rpc "$@"
+  relay /app/bin/paseo_relay rpc "$@" </dev/null

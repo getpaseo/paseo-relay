@@ -1017,3 +1017,30 @@
   earlier four-scheduler full run timed out in the existing strict byte-budget
   test; both subsequent eight-scheduler full suites passed 124/124. No delivery
   or Capacity implementation was changed for this adapter.
+
+## Hetzner rehearsal: current Cloudflare token format (2026-10-27)
+
+- Red: fresh Ubuntu bootstrap returned success from local `/health`, but Caddy
+  exited before opening 443. The active DNS-01 token uses the 53-character
+  `cfut_` format; caddy-dns/cloudflare v0.2.3 accepts only 35–50 characters.
+  Reproduced without credentials or network access by provisioning the actual
+  Caddy image with synthetic `cfut_` plus 48 `A` characters: `caddy validate`
+  exited 1 with `API token ... appears invalid`.
+- Green: pin v0.2.4, which explicitly accepts `cfut_`/`cfat_` tokens. The same
+  synthetic-token validation exits 0 (`Valid configuration`). Extend CI's
+  existing real-module provisioning check to cover legacy and current tokens.
+  This validates token syntax only; real certificate issuance is a staging gate.
+
+## Hetzner rehearsal: release RPC preserves deployment stdin (2026-10-27)
+
+- Red: the first real `deploy.sh` pulled the second digest but left the old
+  relay running, with no socket closes. `docker compose exec -T` inherited the
+  streamed remote shell's stdin and consumed the remaining deployment commands.
+  Interrupted the rollout, verified the old image and cancelled drain, and kept
+  the fleet lock until no rollout process remained.
+- Regression: extend the existing real-container binding check with a streamed
+  `bash -se` script that runs RPC followed by `touch rpc-returned`. The original
+  helper exits with `RPC consumed the remote deployment script` (exit 1).
+- Green: give the argument-only RPC helper `/dev/null` as stdin. The same
+  real-container test reaches its sentinel and passes the listener/RPC/drain
+  checks (exit 0). No deployment-specific flags or Docker version dependency.
