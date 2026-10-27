@@ -2,8 +2,8 @@
 
 This adapter maps Fly runtime values into Paseo Relay's generic clustering and
 reroute configuration. Fly-specific environment variables do not enter the
-core application. This guide deliberately makes no assumptions about a
-particular operator's hostname, regions, Machine IDs, or spare topology.
+core application. The generic template supports other deployments;
+`production.toml` records the production app configuration.
 
 Read [OPERATIONS.md](../../OPERATIONS.md) before operating a live relay.
 
@@ -20,6 +20,36 @@ approval; a push to the repository must never deploy automatically.
 The template also sets `auto_start_machines = false`. This is separate from
 deployment automation: it prevents Fly Proxy from starting stopped capacity.
 Operators must start additional Machines deliberately.
+
+## Production rollout
+
+From the repository root, after local QA and green CI:
+
+```sh
+bash scripts/fly-e2e-all.sh
+fly deploy -c deployment/fly/production.toml --ha=false
+bash scripts/fly-e2e-all.sh
+```
+
+Production uses 4 GB performance Machines, with automatic starts and stops
+disabled. Rolling deployment replaces one running Machine at a time and waits
+for its checks. Its sessions disconnect and reconnect; connections do not
+migrate. `--ha=false` prevents additional spare creation.
+
+Use flyctl v0.4.114 or later with verified stopped-Machine preservation. That
+version updates existing stopped Machines with `skip_launch`, leaving them
+stopped. Capture `fly machines list -a paseo-relay-next --json` before and after;
+verify the same running/stopped IDs, sizes, and new image on every Machine.
+
+Every managed Machine must have `fly_platform_version=v2` and
+`fly_process_group=app` metadata. API-created Machines without the platform
+marker are skipped by `fly deploy`. Register them through the Machines metadata
+API before their first managed rollout; this does not restart them.
+
+The global script checks both message directions on each running Machine.
+Also run the replay probe below with different owner and landing Machines to
+verify cross-region routing. Keep the previous image digest for rollback using
+the same deployment command with `--image <previous-image>`.
 
 ## Bootstrap
 
