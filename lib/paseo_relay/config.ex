@@ -22,6 +22,7 @@ defmodule PaseoRelay.Config do
             reroute_header: "x-reroute-target",
             minimum_cluster_size: 1,
             cluster_query: nil,
+            cluster_nodes: [],
             node_name: nil,
             cookie: nil
 
@@ -33,7 +34,8 @@ defmodule PaseoRelay.Config do
     defaults = defaults()
     host = Map.get(environment, "PASEO_RELAY_HOST", defaults.host)
 
-    with {:ok, ip} <- ip(host),
+    with {:ok, cluster_nodes} <- cluster_nodes(environment),
+         {:ok, ip} <- ip(host),
          {:ok, port} <- port(environment, "PASEO_RELAY_PORT", defaults.port),
          {:ok, drain} <- boolean(environment, "PASEO_RELAY_DRAIN", defaults.drain),
          {:ok, acceptors} <-
@@ -151,6 +153,7 @@ defmodule PaseoRelay.Config do
            Map.get(environment, "PASEO_RELAY_REROUTE_HEADER", defaults.reroute_header),
          minimum_cluster_size: minimum_cluster_size,
          cluster_query: Map.get(environment, "PASEO_RELAY_CLUSTER_QUERY"),
+         cluster_nodes: cluster_nodes,
          node_name: Map.get(environment, "RELEASE_NODE"),
          cookie: Map.get(environment, "RELEASE_COOKIE")
        })}
@@ -163,6 +166,23 @@ defmodule PaseoRelay.Config do
   @spec normalize(t() | map() | keyword()) :: t()
   def normalize(%__MODULE__{} = config), do: config
   def normalize(settings), do: struct!(__MODULE__, Map.new(settings))
+
+  defp cluster_nodes(environment) do
+    nodes =
+      environment
+      |> Map.get("PASEO_RELAY_CLUSTER_NODES", "")
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.uniq()
+
+    if length(nodes) <= 1_000 and
+         Enum.all?(nodes, &(byte_size(&1) <= 255 and Regex.match?(~r/^[^\s@,]+@[^\s@,]+$/, &1))) do
+      {:ok, Enum.map(nodes, &String.to_atom/1)}
+    else
+      {:error,
+       "PASEO_RELAY_CLUSTER_NODES must contain at most 1000 comma-separated name@host peers"}
+    end
+  end
 
   defp ip(host) do
     case :inet.parse_address(String.to_charlist(host)) do

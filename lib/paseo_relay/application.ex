@@ -10,6 +10,7 @@ defmodule PaseoRelay.Application do
 
     children = [
       {DNSCluster, query: config.cluster_query || :ignore},
+      {PaseoRelay.StaticCluster, nodes: config.cluster_nodes},
       {PaseoRelay.Drain, config.drain},
       PaseoRelay.Metrics,
       {PaseoRelay.RuntimeSupervisor, config}

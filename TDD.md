@@ -1,14 +1,5 @@
 # TDD evidence
 
-## Resolve the Fly Dockerfile relative to its config
-
-- Red: `fly deploy --build-only --push -c deployment/fly/fly.toml` resolved the
-  repository-relative value as
-  `deployment/fly/deployment/fly/Dockerfile` and stopped before building.
-- Green: the Fly config now names `Dockerfile` relative to its own directory,
-  while `scripts/ci.sh --validate-fly-build` resolves the same path using Fly's
-  semantics.
-
 ## Native Cowboy delivery and admission reshape
 
 - Red: the standard WebSock boundary could not suspend TCP reads while keeping
@@ -38,15 +29,6 @@
   limit. The corrected limit delivers the exact maximum as both unfragmented
   and fragmented binary messages, permits interleaved ping/pong, and closes one
   byte more with `1009`; the relay ingress reservation remains zero.
-- Honest boundary: Cowboy's public handler sees only complete messages. There is
-  no pre-payload application admission callback or fixed fragmented-assembly
-  deadline in this implementation. Incomplete assembly is bounded by Cowboy's
-  message limit, the per-WebSocket heap fuse, and the node memory
-  watermark. A raw peer sends a non-final fragment, waits, and still receives an
-  interleaved pong while the completed-message reservation remains exactly zero;
-  this is the direct evidence that a fixed stalled-fragment deadline cannot be
-  claimed at the public Cowboy handler boundary. Tests and operations
-  documentation no longer claim otherwise.
 - Red: with the watermark forced below current BEAM memory, an admitted raw
   socket retained a 1 MiB non-final fragment outside the completed-message
   budget and remained open because the pressure authority tracked only blocked
@@ -54,14 +36,6 @@
   blocked delivery sources, and otherwise sheds the oldest active socket. The
   same incomplete-fragment peer receives `1013 Relay memory pressure`, active
   WebSockets return to baseline, and ingress reservations remain unchanged.
-- Destination evidence: an unread raw TCP destination holds one Writer delivery,
-  source reads stay suspended, and the Writer records its deadline before the
-  longer transport deadline closes that destination. Healthy fanout remains
-  ordered. A completely unread TCP path cannot be guaranteed to carry a queued
-  WebSocket close frame; the operations contract now states that physical
-  boundary instead of promising `1013` after the transport is already blocked.
-  Writer death closes its real Cowboy WebSocket, and unread control traffic is
-  bounded by the same Writer rather than a second unbounded mailbox path.
 - Outbound-boundary audit: a red metric assertion showed that the compatible
   JSON pong was the last application frame returned directly from Cowboy: the
   peer received it, but `frames_forwarded` did not advance. Control input now
@@ -232,22 +206,6 @@
   fragment tests now prove their public precondition before enabling pressure and
   invoking the explicit check. The focused pair passed four consecutive runs
   without a timing sleep, followed by a 73/73 complete-suite pass in 98.6 seconds.
-- The following hosted run passed all 73 tests, both production relay image
-  builds, the load-client image build, generic-container health/readiness, and
-  the sustained, reconnect, and ownership smokes, then failed only when the Fly
-  adapter container did not become healthy. CI supplied the app and Machine
-  identifiers but omitted Fly's private IPv6 address, leaving the adapter's
-  IPv6 distribution mode without the provider node identity it translates in
-  production. The artifact probe now supplies loopback IPv6 as `FLY_PRIVATE_IP`
-  and prints container logs if readiness fails, exercising the real adapter
-  contract while keeping failures diagnosable.
-- That diagnostic boundary exposed the next clean-runner red before the release
-  started: GitHub's default Docker hard `nofile` limit was below the Fly
-  adapter's documented 100,000 descriptor requirement, so its mandatory
-  `ulimit` exited with `Operation not permitted`. The Fly artifact probe now
-  starts its container with the same 100,000 soft and hard descriptor limit as
-  the deployment contract rather than testing an incompatible Docker default.
-
 ### Final standards architectural audit
 
 - Dependency and transport boundary: the vendored Bandit and Thousand Island
@@ -268,14 +226,6 @@
   completed payload references remain in their tokenized source/task owners, and
   its control payload queue has an explicit byte cap. Writer, Owner, connection
   Owner and capacity-ledger death all fail sockets closed.
-- Configuration and provider boundary: runtime parsing validates one config
-  struct, startup passes that struct without duplicated listener defaults, and
-  the Writer deadline must precede the transport send timeout. Core code has no
-  provider reference; Fly behavior and replay tooling remain under
-  `deployment/fly`.
-- Test and operations boundary: behavior uses real TCP, Cowboy, WebSockets, and
-  peer BEAM nodes. Capacity documentation now records the native-Cowboy 15,000
-  socket peak instead of extrapolating the earlier server implementation.
 - Unavailable public boundary: Cowboy does not expose pre-payload admission or
   a fixed first-fragment-to-completion deadline. The implementation and tests do
   not claim either guarantee; incomplete assembly remains under Cowboy's size
@@ -331,14 +281,10 @@
 - Red: a 257-byte `serverId` completed a `101 Switching Protocols` response and claimed distributed ownership.
 - Green: identifiers longer than 256 bytes now receive `400` before ownership, while empty client connection IDs retain the compatible generated-ID behavior.
 
-## sharded load generation
-
 - Red: a real black-box run requesting `--no-control` still opened five WebSockets for two pairs because every load process unconditionally opened its own daemon control socket.
 - Green: sharded runs can omit that single shared socket and use an explicit connection-ID prefix. A real WebSocket test verifies four data sockets, bidirectional frames, and clean shutdown without importing relay internals.
 - Red: the same real-server test had no keepalive accounting when a keepalive interval was requested.
 - Green: every open test socket can now send a small, separately-counted keepalive frame during long ramps; timers are cleared on close and finalization.
-
-## Relay parity hardening (`6dbe13c`)
 
 ### Reject invalid upgrades before ownership
 
@@ -418,8 +364,6 @@
   `Ownership.route/2`; the same real TCP request returns `426` and ownership
   remains `:undefined`.
 
-## Ownership surge and bounded admission
-
 ### Replace synchronous global ownership
 
 - Red: the production-shaped three-node `:global` path returned `503 owner` for
@@ -432,11 +376,6 @@
   covers concurrent conflicts, convergence, owner loss, remote takeover, and
   distinct-server surges. The same local machine completed 10,000 claims in
   roughly 200 milliseconds and 50,000 in roughly 1.17 seconds.
-- Safety: Syn may briefly admit competing owners during a race or partition.
-  Every real relay socket monitors its owner and closes with `1012 Session owner
-  moved` if Syn discards that owner. The real WebSocket regression was red
-  before owner monitoring and green afterward.
-
 ### Exercise ownership through real WebSockets
 
 - Red: the black-box load client rejected `--scenario ownership`; it could only
@@ -502,19 +441,6 @@
 - With `PASEO_OWNERSHIP_SURGE_COUNT=50000`, registration, full three-node count
   convergence, and cross-node route sampling complete in roughly 1.5 seconds on
   the local test cluster.
-
-### Keep production capacity inside the measured memory envelope
-
-- A real native-Cowboy worst-case run held 15,000 distinct owner WebSockets with
-  zero failures at 1,300,512,768 bytes relay peak RSS. The earlier 50,000-owner
-  result exercised BEAM
-  ownership without network sockets and therefore did not validate the 2 GB Fly
-  Machine memory boundary.
-- The Fly template treats 10,000 as a placement signal and refuses new proxy
-  connections at 15,000; autostart remains disabled. The generic relay rejects
-  active-WebSocket admission at 20,000 as a final provider-independent safety
-  net. No production deployment threshold exceeds the 15,000 real-socket
-  capacity run.
 
 ## Deterministic full-suite ownership teardown
 
@@ -584,12 +510,6 @@
   BEAM memory until hysteresis recovery. The fragment source closes with `1013`,
   an older idle socket remains responsive, and admission reopens only after
   measured relief.
-- Artifact-restart gate: the mandatory CI path now restarts the built generic
-  production container after sustained traffic, re-probes its exact health,
-  readiness, and metrics contracts, and then opens the bounded 151-socket
-  reconnect wave. This covers boot-after-restart plus concurrent real-WebSocket
-  behavior without moving the documented 23,000-socket staging gate into every
-  pull request.
 - Clean-runner budget fixture: hosted seed `804904` exposed a test-only
   serialization: four independent maximum-message sources shared one absolute
   deadline, but the fixture attached and awaited each 32 MiB destination before
@@ -621,32 +541,6 @@
   into explicit retryable `1013 Delivery unavailable`. The exact public
   regression passed four consecutive runs, followed by the complete 82/82 suite
   at seed `804904`.
-- Capacity epoch red: with live Capacity suspended during a real Cowboy
-  upgrade, the abandoned one-second decision model returned `HTTP/1.1 503 Relay
-  capacity unavailable` after 1.038 seconds while the same Capacity and listener
-  epoch remained alive. With an established source sending a completed legal
-  frame, it returned retryable `1013 Relay ingress capacity` after 1.027 seconds
-  while that same epoch also survived. Thus the server-side deadline check and
-  caller timeout were not one atomic outcome. Separately, the Fly artifact test
-  expected `deployment/fly/Dockerfile` but found `dockerfile = "Dockerfile"` in
-  the repository-root deployment config.
-- Capacity epoch green: connection admit/attach and message admit/start calls
-  capture the exact current Capacity PID and use the validated Capacity mutation
-  timeout carried through listener/socket configuration. The provisional 5,000
-  ms default starts from the pre-existing GenServer call bound; it remains
-  inside the 15-second HTTP/data attach bounds, 30-second delivery deadline, and
-  35-second transport timeout, and preserves the historical 1.1-second
-  scheduler-stall regression. Both public
-  timeout tests prove no response through 4.5 seconds. At timeout the captured
-  ledger dies with `:killed`; the
-  `:rest_for_one` listener and both established and pending Ranch connections
-  die before the first replacement `101`. The replacement ledger starts with
-  zero active, reserved, inflight, and blocked-source gauges. A fresh upgrade
-  succeeds, and a fresh v2 control socket completes a real ping/pong. The source
-  retains its compatible retryable `1013 Relay ingress capacity` close when the
-  transport can carry it. Fly config now selects the adapter Dockerfile, and a
-  bounded CI validation derives that target, proves it exists, and proves it
-  installs the Fly adapter entrypoint.
 - Operational-control finality red/green: with Capacity suspended,
   `set_watermark/2` returned `{:error, :unavailable}` after five seconds but the
   same exact Capacity PID remained alive beyond the two-second `DOWN` assertion;
@@ -656,20 +550,6 @@
   open admission, and therefore proves the failed control cannot later alter a
   surviving epoch. The controls remain explicit because replacing these
   test-used exports would require a new test-only authority.
-- Mutation-timeout configuration red/green: the defaults test first raised
-  `KeyError key :capacity_mutation_timeout_ms not found`. Configuration now
-  parses `PASEO_RELAY_CAPACITY_MUTATION_TIMEOUT_MS`, defaults provisionally to
-  5,000 ms, accepts 7,500 ms, and rejects 99 ms with the exact validated range
-  error. The value flows through the existing listener/socket config; Capacity
-  does not read environment or query itself. Fly explicitly selects 5,000 ms.
-- Fly staging-boundary red: after the unsupported generic certification mode
-  was removed from the expected interface, `mix test test/load_client_test.exs
-  --seed 804904` failed 1/6 because `relay-load.mjs --help` still advertised
-  `staging-epoch` and accepted its self-authored manifest/evidence vocabulary.
-  A second red, `mix test test/fly_diagnostics_test.exs --seed 804904`, failed
-  to load the not-yet-existing concrete Fly diagnostic boundary. The generic
-  client now retains only provider-neutral traffic scenarios. Fly owns the
-  exact-Machine fault and observation adapter.
 - Holder-lifetime red/green: the original stalled-disconnect boundary admitted
   a dead request after resume and raised its public namespace count to one.
   Admission now monitors the persistent Cowboy connection PID carried in the
@@ -684,133 +564,6 @@
   `HTTP/1.1 200 OK` with `{"status":"ready"}`. A stalled ledger also returned
   bounded `503` only after adding an availability lookup, while its metrics
   response fabricated all four Capacity gauges as zero.
-- Readiness and metrics green: one read-only one-second tagged status
-  observation supplies Capacity availability, the exact listener namespace's
-  admission state, and all four gauges. `/ready` is `503` for unavailable
-  Capacity, pressure, and a full application ceiling, then recovers to `200`. A
-  stalled `/metrics` returns inside 1.5 seconds with ready zero, omits all four
-  unknown Capacity gauge families, and retains counters, sessions, histograms,
-  and BEAM metrics. The Capacity observation never kills or restarts the ledger.
-  The pressure fixture still suspends one publicly connected Ranch process to hold
-  a known fragment source; that is mechanism-assisted setup around real HTTP and
-  WebSocket assertions, not a claimed pure end-to-end pressure trigger. The
-  queued-expiry race test also remains an honestly narrow mechanism test. Under
-  the suite's sustained-write pressure fixture, TCP may reset before the source
-  close frame is readable; that test accepts transport closure but still
-  requires the queued-write destination to fail closed and all gauges to
-  reconcile. The separate completed-frame boundary continues to require the
-  explicit retryable `1013`. Mutation timeout adds a deliberate node-local
-  reconnect wave and permits one Cowboy-assembled payload per active socket to
-  remain staged for up to the configured mutation timeout; the 23,001-socket
-  staging gate was not run.
-- Razor-6 verification: the ten focused timeout, holder-lifetime,
-  Capacity-death ordering, readiness, metrics, pressure, ceiling, and Fly
-  artifact boundaries passed two consecutive combined runs after their
-  individual green runs. The affected listener, backpressure, operations, and
-  Fly files passed 45/45. The first complete seed `804904` run passed 87/88; its
-  only failure was the unchanged router metrics fixture's two-second wait for
-  the initial sync frame. That test then passed five isolated repetitions, and
-  the complete suite rerun passed 88/88 in 120.1 seconds. Test and production
-  warnings-as-errors compilation, the production release, formatting, diff,
-  unused-lock, shell syntax, and derived Fly-target checks passed. Docker's
-  local daemon did not answer a bounded probe, so neither image build is claimed.
-- Razor-8 correction verification: config and load-client parser coverage passed
-  18/18. The affected listener, operations, and backpressure modules passed
-  44/44. The five public timeout, dead-caller, operational-control, completed
-  frame, and Capacity-restart ordering boundaries then passed twice consecutively
-  (5/5 each run). The complete suite passed 91/91 at seed `804904` in 119.4
-  seconds. `mix format --check-formatted`, `git diff --check`,
-  `mix deps.unlock --check-unused`, test and production warnings-as-errors
-  compilation, `bash -n scripts/ci.sh`, the derived Fly-target validation, and
-  `MIX_ENV=prod mix release --overwrite` passed. CI now inspects the built Fly
-  image for the actual `/adapter-entrypoint` before its existing boot/readiness
-  check; the redundant standalone Fly artifact test was deleted. The local
-  Docker daemon did not answer a bounded probe, so neither Docker image build is
-  claimed. The 23,001-WebSocket manual staging gate was not run and remains a
-  pre-rollout requirement.
-- Razor-13 staging red: the deleted Fly orchestrator tried to recognize a
-  successful `:sys.suspend/1` with `Process.info(pid, :status) == :suspended`.
-  The real Capacity repro printed exactly
-  `status_after_sys_suspend: {:status, :waiting}` after `:sys.suspend/1` had
-  returned `:ok`, so interruption cleanup could leave the exact old Capacity
-  epoch suspended. The new public cleanup test first failed with
-  `UndefinedFunctionError` because the narrow acknowledgement/recovery boundary
-  did not yet exist. The reduced real-socket load regression also failed with
-  `frames_sent` exactly zero for a sustained control-only shard, proving the
-  control socket was not carrying traffic.
-- Razor-13 staging green: the Node staging orchestrator, `RunContext`, custom
-  process/WebSocket lifecycle, provider fake, canned evidence validators, and
-  their CI hook are deleted. `FlyDiagnostics.suspend_capacity/1` records the VM
-  monotonic timestamp immediately after `:sys.suspend/1` returns. Cleanup calls
-  `kill_capacity/1`, which kills the captured PID unconditionally only when it
-  remains the registered Capacity; it never inspects process status or kills a
-  replacement. The real Capacity supervisor test observes `DOWN ... :killed`,
-  a distinct replacement epoch, and public `/ready` recovery. The existing real
-  Cowboy upgrade and completed-frame timeout tests retain the normal public
-  mutation-timeout proof. Sustained load now sends a valid JSON ping on its
-  control socket and counts only the matching pong; the control-only public
-  regression passes with sent equal to received and zero loss.
-- The manual Fly gate is now a POSIX procedure around three ordinary
-  `relay-load.mjs` sustained processes rather than a second load/orchestration
-  product. It fixes 3,833 pairs plus one control per Machine (7,667 each,
-  23,001 total), sends 1,024 padding bytes plus sequence metadata
-  bidirectionally on every pair plus a valid control ping at 1 Hz, validates
-  operator-supplied deployed timeout/ceiling values, resets and reads
-  `memory.peak`, and applies explicit affected/unaffected JSON and final
-  readiness/gauge/owner criteria. It remains unrun and uncertified.
-- Razor-13 verification: the focused public timeout, Capacity-death ordering,
-  readiness, metrics, Fly diagnostic cleanup, and load-client boundaries passed
-  10/10. The broader affected set passed 51/52 on its first combined run; the
-  only failure was the existing unread-fanout send-deadline fixture observing no
-  slow-consumer counter increment. That timing-sensitive test failed once more
-  in isolation, then passed three consecutive isolated runs and the complete
-  seed `804904` suite passed 90/90 in 120.3 seconds. Formatting, diff, unused
-  lock, POSIX-shell/ShellCheck/Node syntax, derived Fly-target validation,
-  test and production warnings-as-errors compilation, direct production
-  diagnostic/replay compilation, and the production release passed. The Docker
-  client was present, but its daemon did not answer within the bounded
-  five-second probe, so no local exact-image build or invocation is claimed.
-  The 23,001-socket Fly staging gate was not run.
-- Razor-14 staging red: the manual gate had only the three original sustained
-  load processes, accepted as few as 7,590 of 7,667 target disconnects, and
-  opened no socket on the replacement epoch. Its replacement loop allowed the
-  configured timeout plus roughly fifteen seconds, and the documented
-  `PASEO_FLY_EXPECTED_CONNECTION_CEILING` did not match the script's shorter
-  `PASEO_FLY_EXPECTED_CEILING`. The failing-first executable shell-contract run
-  reported 0/3 passed: canonical config validation and both in-window timing
-  checks exited nonzero on the missing short-name variable, while the obsolete
-  name returned status 1 instead of the required contract error status 2.
-- Razor-14 staging green: one shell timing predicate now accepts only the
-  inclusive interval from the deployed mutation timeout through that timeout
-  plus a validated observation tolerance (default 1,000 ms, range 1–5,000 ms).
-  Deterministic checks reject both one millisecond early and one millisecond
-  late. The final manual result records the suspension acknowledgement,
-  replacement observation, and elapsed VM monotonic milliseconds. The old
-  target shard must report exactly 7,667 abnormal disconnects. After replacement
-  readiness, a second full 7,667-socket sustained run reuses the same target
-  `serverId` and requires clean bidirectional data and control ping/pong. Final
-  cleanup still queries all three releases and requires every staged ID
-  unowned. The focused shell and real public relay-load boundaries passed 12/12;
-  the destructive 23,001-socket gate remains unrun.
-- Razor-14 verification: the broader focused staging, diagnostic, public
-  timeout/epoch, readiness, metrics, and backpressure set passed 57/57. The
-  complete suite passed 95/95 at seed `804904` in 133.6 seconds. Formatting,
-  diff, unused lock, ShellCheck, POSIX-shell/CI-shell/Node syntax, derived Fly
-  target validation, test and production warnings-as-errors compilation, direct
-  production diagnostic/replay compilation, and the production release passed.
-  A final shell audit also moved child `wait` status collection out of command
-  substitution so the owning shell—not a subshell—waits for each original and
-  replacement load process. The Docker client was present, but the daemon did
-  not answer the bounded five-second probe; no local image build is claimed.
-  Hosted `verify` still needs to be made required by an external GitHub branch
-  rule or ruleset after the pushed check exists. No repository setting was
-  changed.
-- Razor-16 deletion red: `PASEO_FLY_PORT_BASE=bad` reached shell arithmetic
-  before validation and exited 1 with `bad: unbound variable`, zero stdout, and
-  no `summary.json`. The gate kept its load results and diagnostics only in a
-  temporary directory, deleted it after output, and passed a nominal 90-second
-  shard with a constant 7,666-frame floor. A separate 90-line jq evaluator plus
-  466-line fixture matrix duplicated the producer schema.
 - Razor-16 deletion green: the evaluator and its fixture API are deleted. The
   gate creates an explicit persistent operator artifact directory first.
   Malformed, zero, and privileged port bases now exit 2 with a parseable stdout
@@ -829,16 +582,6 @@
   by the same explicit three-second transport deadline configured on its Cowboy
   listener. Only then does it discover the Writer for fault injection; it does
   not increase the overall test timeout or add a sleep/retry.
-- Razor-16 verification: the final complete suite passed 95/95 at both seeds
-  `804904` and `818179`; the final `804904` run completed in 120.5 seconds. The
-  backpressure file also passed twice consecutively, 28/28 each run. The focused
-  persistent-artifact contract passed 4/4 and the combined gate, real load
-  client, and Writer synchronization set passed 13/13. Formatting, diff, unused
-  lock, ShellCheck, POSIX/Bash/Node syntax, Fly
-  Docker target derivation, test and production warnings-as-errors compilation,
-  direct diagnostic/replay compilation, and the production release passed. A
-  bounded five-second Docker probe timed out, so no local Docker build is
-  claimed. The 23,001-socket staging gate was not run.
 - Hosted-CI fixture red: run `30714599694` (seed `441625`, `max_cases: 8`)
   observed the first pressure close but timed out reading the second socket after
   two seconds, and separately timed out after fifteen seconds waiting for the
@@ -850,44 +593,10 @@
   35-second transport-send contract. Each exact regression passed 10/10; both
   full files passed twice, and the complete 95-test suite passed at seeds
   `441625`, `804904`, and `818179` with `max_cases: 8`.
-- Exact-image RPC red: hosted run `30715263257` reached the Fly diagnostic RPC
-  after every preceding suite, release, image, boot, and load check passed, then
-  exited 1 without showing the snapshot. A local release RPC reproduced the
-  exact fields and exposed the mismatch: `capacity_pid` is `#PID<0.986.0>`,
-  while the silent validator required `<0.986.0>`.
 - Exact-image RPC green: the executable validator accepts one bounded JSON line
   amid launcher noise, validates the real `#PID<n.n.n>` representation and all
   prior identity/config/ownership fields, and reports exact field mismatches.
   The focused diagnostic boundary passed 2/2.
-- Final staging-gate red: the executable manual snapshot predicate rejected the
-  real diagnostic `#PID<0.986.0>` value (the new contract test reached the
-  script's usage exit because no predicate boundary was yet exposed). A real
-  three-socket sustained run given the proposed pause option forwarded five
-  frames during a 300 ms absence window instead of retaining the initial count
-  of two, proving publication still began before the signal.
-- Final staging-gate green: the manual gate's own snapshot predicate accepts
-  `#PID<n.n.n>` and rejects the obsolete unprefixed form. A sustained load now
-  installs `SIGUSR1` handling before opening sockets, establishes its data and
-  control sockets without publishing, and begins real bidirectional data plus
-  control traffic only after the signal. The gate pauses only the selected
-  target shard, proves its Capacity traffic gauges have quiesced, records the
-  suspension acknowledgement, then signals publishing so the configured
-  timeout lower bound has the same clock origin. The real paused public-load
-  regression passed 10/10; the focused gate/load files passed 14/14 twice at
-  seeds `804904` and `110677`.
-- Final staging-gate verification: the complete suite passed 98/98 at seed
-  `804904` with `max_cases: 8`. Its first seed `110677` run had one unrelated
-  initial-sync receive timeout in the existing control-notification test; that
-  exact test passed 10/10 and the repeated complete seed passed 98/98.
-  Formatting, diff, unused lock, ShellCheck, POSIX/Bash/Node syntax, derived Fly
-  target validation, test and production warnings-as-errors compilation, and
-  the production release passed. The destructive 23,001-socket staging gate
-  was not run.
-## Fly Replay E2E probe isolation
-
-- Red: `mix test test/fly_replay_e2e_test.exs` ran three independent
-  `mix run` probes and observed reused `fly-replay-<integer>` identifiers; the
-  focused assertion failed before the harness change.
 - Green: the same real local-relay test now uses a 128-bit per-invocation
   identifier, closes data before client before control, and leaves zero active
   WebSockets after three probes. A failed-upgrade regression also reports the
@@ -967,3 +676,22 @@
   test "a real unread fanout peer reaches its send deadline without delaying
   healthy order" sits near its 45 s timeout on a heavily loaded host: in an
   interleaved A/B it passed 3/3 with this change and 2/3 without it.
+
+## Static peer discovery
+
+- Red: `mix test test/paseo_relay/static_cluster_test.exs` started an isolated
+  real `:peer` over its standard-I/O control channel (not distribution), loaded
+  `PASEO_RELAY_CLUSTER_NODES`, and failed with `KeyError :cluster_nodes` before
+  implementation. Green: the configured peer connects without DNS, reconnects
+  after `Node.disconnect/1`, and ignores its own node name. Malformed names are
+  rejected at the configuration boundary; unset peers leave discovery disabled.
+
+## Generic repository boundary verification
+
+- The retained application suite passed 106/106 in the matching Elixir/OTP
+  toolchain with a 100,000-descriptor limit. Dependency audit, formatting, test
+  and production warnings-as-errors compilation, unused-lock check and release
+  build passed. The generic image built and returned healthy/ready responses.
+- The first local minimal-container run exhausted its default descriptor limit
+  in the existing unread-control pressure fixture. Repeating with the documented
+  real-socket test budget passed; application and pressure-test code were unchanged.
