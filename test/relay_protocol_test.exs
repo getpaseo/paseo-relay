@@ -178,7 +178,7 @@ defmodule PaseoRelay.RelayProtocolTest do
 
     state = %{
       admission: admission,
-      config: PaseoRelay.Config.defaults(),
+      config: &PaseoRelay.Config.defaults/0,
       connection: connection,
       owner: owner,
       reservation: reservation

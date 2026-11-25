@@ -321,7 +321,10 @@ defmodule PaseoRelay.PlacementTest do
   end
 
   # A call returns after Placement handled every arrival recorded before it.
-  defp barrier(cluster, relay), do: rpc(cluster, relay, Placement, :settings, [])
+  defp barrier(cluster, relay) do
+    _state = rpc(cluster, relay, :sys, :get_state, [PaseoRelay.Placement.Server])
+    :ok
+  end
 
   defp owner_node(cluster, relay, id) do
     case rpc(cluster, relay, Ownership, :owner_pid, [id]) do

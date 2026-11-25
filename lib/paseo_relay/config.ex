@@ -1,191 +1,84 @@
 defmodule PaseoRelay.Config do
-  @moduledoc false
+  @moduledoc """
+  The relay settings: one table gives each field its default, its environment
+  variable and its validation rule.
 
-  defstruct host: "127.0.0.1",
-            ip: {127, 0, 0, 1},
-            port: 4000,
-            drain: false,
-            acceptors: 100,
-            connections_per_acceptor: 200,
-            http_idle_timeout_ms: 15_000,
-            capacity_mutation_timeout_ms: 5_000,
-            ingress_budget_bytes: 512 * 1024 * 1024,
-            ingress_weight: 4,
-            delivery_timeout_ms: 30_000,
-            transport_send_timeout_ms: 35_000,
-            control_queue_bytes: 1024 * 1024,
-            data_attach_timeout_ms: 15_000,
-            tcp_receive_buffer_bytes: 1024 * 1024,
-            websocket_max_heap_words: 32 * 1024 * 1024,
-            memory_watermark_bytes: 0,
-            heal_enabled: true,
-            heal_delay_ms: 360_000,
-            heal_rate_per_sec: 25,
-            heal_attempt_window_ms: 120_000,
-            heal_cooldown_ms: 1_800_000,
-            home_max_idle_ms: 7 * 24 * 60 * 60 * 1_000,
-            ownership_target: "local",
-            reroute_header: "x-reroute-target",
-            minimum_cluster_size: 1,
-            cluster_query: nil,
-            cluster_nodes: [],
-            node_name: nil,
-            cookie: nil
+  `load/1` reads the table from the environment when the node boots.
+  `put_live/2` applies the same rules to a change on a running node. A field
+  can change live unless it is listed in `boot_only/0`, so a field added to the
+  table is a live setting without more work.
+  """
+
+  @mebibyte 1024 * 1024
+  @day_ms 24 * 60 * 60 * 1_000
+
+  # {field, default, environment variable, rule}
+  @settings [
+    {:host, "127.0.0.1", "PASEO_RELAY_HOST", :ip_address},
+    {:port, 4000, "PASEO_RELAY_PORT", {:integer, 1..65_535}},
+    {:drain, false, "PASEO_RELAY_DRAIN", :boolean},
+    {:acceptors, 100, "PASEO_RELAY_ACCEPTORS", {:integer, 1..1_000}},
+    {:connections_per_acceptor, 500, "PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR",
+     {:integer, 1..1_000_000}},
+    {:http_idle_timeout_ms, 15_000, "PASEO_RELAY_HTTP_IDLE_TIMEOUT_MS", {:integer, 100..120_000}},
+    {:capacity_mutation_timeout_ms, 5_000, "PASEO_RELAY_CAPACITY_MUTATION_TIMEOUT_MS",
+     {:integer, 100..120_000}},
+    {:ingress_budget_bytes, 512 * @mebibyte, "PASEO_RELAY_INGRESS_BUDGET_BYTES",
+     {:integer, (128 * @mebibyte)..(8 * 1024 * @mebibyte)}},
+    {:ingress_weight, 4, "PASEO_RELAY_INGRESS_WEIGHT", {:integer, 1..16}},
+    {:delivery_timeout_ms, 30_000, "PASEO_RELAY_DELIVERY_TIMEOUT_MS", {:integer, 100..120_000}},
+    {:transport_send_timeout_ms, 35_000, "PASEO_RELAY_TRANSPORT_SEND_TIMEOUT_MS",
+     {:integer, 100..300_000}},
+    {:control_queue_bytes, @mebibyte, "PASEO_RELAY_CONTROL_QUEUE_BYTES",
+     {:integer, 64..(64 * @mebibyte)}},
+    {:data_attach_timeout_ms, 15_000, "PASEO_RELAY_DATA_ATTACH_TIMEOUT_MS",
+     {:integer, 1_000..120_000}},
+    {:tcp_user_buffer_bytes, 65_536, "PASEO_RELAY_TCP_USER_BUFFER_BYTES",
+     {:integer, 4_096..@mebibyte}},
+    {:tcp_receive_buffer_bytes, :auto, "PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES",
+     {:auto_or_integer, 4_096..@mebibyte}},
+    {:websocket_max_heap_words, 32 * @mebibyte, "PASEO_RELAY_WEBSOCKET_MAX_HEAP_WORDS",
+     {:integer, (32 * @mebibyte)..(128 * @mebibyte)}},
+    {:memory_watermark_bytes, 0, "PASEO_RELAY_MEMORY_WATERMARK_BYTES",
+     {:zero_or_integer, (256 * @mebibyte)..(64 * 1024 * @mebibyte)}},
+    {:oom_min_available_percent, 10, "PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT", {:integer, 0..50}},
+    {:oom_recovery_available_percent, 15, "PASEO_RELAY_OOM_RECOVERY_AVAILABLE_PERCENT",
+     {:integer, 0..100}},
+    {:heal_enabled, true, "PASEO_RELAY_HEAL_ENABLED", :boolean},
+    {:heal_delay_ms, 360_000, "PASEO_RELAY_HEAL_DELAY_MS", {:integer, 0..@day_ms}},
+    {:heal_rate_per_sec, 25, "PASEO_RELAY_HEAL_RATE_PER_SEC", {:integer, 1..500}},
+    {:heal_attempt_window_ms, 120_000, "PASEO_RELAY_HEAL_ATTEMPT_WINDOW_MS",
+     {:integer, 1_000..@day_ms}},
+    {:heal_cooldown_ms, 1_800_000, "PASEO_RELAY_HEAL_COOLDOWN_MS", {:integer, 0..(7 * @day_ms)}},
+    {:home_max_idle_ms, 7 * @day_ms, "PASEO_RELAY_HOME_MAX_IDLE_MS",
+     {:integer, 1_000..(90 * @day_ms)}},
+    {:ownership_target, "local", "PASEO_RELAY_OWNERSHIP_TARGET", :string},
+    {:reroute_header, "x-reroute-target", "PASEO_RELAY_REROUTE_HEADER", :string},
+    {:minimum_cluster_size, 1, "PASEO_RELAY_MIN_CLUSTER_SIZE", {:integer, 1..1_000}},
+    {:cluster_query, nil, "PASEO_RELAY_CLUSTER_QUERY", :optional_string},
+    {:cluster_nodes, [], "PASEO_RELAY_CLUSTER_NODES", :nodes},
+    {:node_name, nil, "RELEASE_NODE", :optional_string},
+    {:cookie, nil, "RELEASE_COOKIE", :optional_string}
+  ]
+
+  # The listener address, the acceptor pool and the node identity exist once per
+  # VM. `ip` is the parsed `host`. DNSCluster takes its query only when it starts.
+  @boot_only [:host, :ip, :port, :acceptors, :cluster_query, :node_name, :cookie]
+
+  defstruct [
+    {:ip, {127, 0, 0, 1}} | Enum.map(@settings, fn {field, default, _, _} -> {field, default} end)
+  ]
 
   @type t :: %__MODULE__{}
-
-  @memory_watermark_bytes (256 * 1024 * 1024)..(64 * 1024 * 1024 * 1024)
-  @heal_delay_ms 0..86_400_000
-  @heal_rate_per_sec 1..500
 
   @spec load(Enumerable.t()) :: {:ok, t()} | {:error, String.t()}
   def load(environment \\ System.get_env()) do
     environment = Map.new(environment)
-    defaults = defaults()
-    host = Map.get(environment, "PASEO_RELAY_HOST", defaults.host)
 
-    with {:ok, cluster_nodes} <- cluster_nodes(environment),
-         {:ok, ip} <- ip(host),
-         {:ok, port} <- port(environment, "PASEO_RELAY_PORT", defaults.port),
-         {:ok, drain} <- boolean(environment, "PASEO_RELAY_DRAIN", defaults.drain),
-         {:ok, acceptors} <-
-           integer(environment, "PASEO_RELAY_ACCEPTORS", defaults.acceptors, 1..1_000),
-         {:ok, connections_per_acceptor} <-
-           integer(
-             environment,
-             "PASEO_RELAY_CONNECTIONS_PER_ACCEPTOR",
-             defaults.connections_per_acceptor,
-             1..1_000_000
-           ),
-         {:ok, http_idle_timeout_ms} <-
-           integer(
-             environment,
-             "PASEO_RELAY_HTTP_IDLE_TIMEOUT_MS",
-             defaults.http_idle_timeout_ms,
-             100..120_000
-           ),
-         {:ok, capacity_mutation_timeout_ms} <-
-           integer(
-             environment,
-             "PASEO_RELAY_CAPACITY_MUTATION_TIMEOUT_MS",
-             defaults.capacity_mutation_timeout_ms,
-             100..120_000
-           ),
-         {:ok, ingress_budget_bytes} <-
-           integer(
-             environment,
-             "PASEO_RELAY_INGRESS_BUDGET_BYTES",
-             defaults.ingress_budget_bytes,
-             (128 * 1024 * 1024)..(8 * 1024 * 1024 * 1024)
-           ),
-         {:ok, ingress_weight} <-
-           integer(environment, "PASEO_RELAY_INGRESS_WEIGHT", defaults.ingress_weight, 1..16),
-         :ok <- validate_ingress_budget(ingress_budget_bytes, ingress_weight),
-         {:ok, delivery_timeout_ms} <-
-           integer(
-             environment,
-             "PASEO_RELAY_DELIVERY_TIMEOUT_MS",
-             defaults.delivery_timeout_ms,
-             100..120_000
-           ),
-         {:ok, transport_send_timeout_ms} <-
-           integer(
-             environment,
-             "PASEO_RELAY_TRANSPORT_SEND_TIMEOUT_MS",
-             defaults.transport_send_timeout_ms,
-             100..300_000
-           ),
-         :ok <- validate_delivery_timeouts(delivery_timeout_ms, transport_send_timeout_ms),
-         {:ok, control_queue_bytes} <-
-           integer(
-             environment,
-             "PASEO_RELAY_CONTROL_QUEUE_BYTES",
-             defaults.control_queue_bytes,
-             64..(64 * 1024 * 1024)
-           ),
-         {:ok, data_attach_timeout_ms} <-
-           integer(
-             environment,
-             "PASEO_RELAY_DATA_ATTACH_TIMEOUT_MS",
-             defaults.data_attach_timeout_ms,
-             1_000..120_000
-           ),
-         {:ok, tcp_receive_buffer_bytes} <-
-           integer(
-             environment,
-             "PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES",
-             defaults.tcp_receive_buffer_bytes,
-             (4 * 1024)..(1024 * 1024)
-           ),
-         {:ok, websocket_max_heap_words} <-
-           integer(
-             environment,
-             "PASEO_RELAY_WEBSOCKET_MAX_HEAP_WORDS",
-             defaults.websocket_max_heap_words,
-             (32 * 1024 * 1024)..(128 * 1024 * 1024)
-           ),
-         {:ok, memory_watermark_bytes} <-
-           disabled_or_integer(
-             environment,
-             "PASEO_RELAY_MEMORY_WATERMARK_BYTES",
-             defaults.memory_watermark_bytes,
-             @memory_watermark_bytes
-           ),
-         {:ok, heal_enabled} <-
-           boolean(environment, "PASEO_RELAY_HEAL_ENABLED", defaults.heal_enabled),
-         {:ok, heal_delay_ms} <-
-           integer(
-             environment,
-             "PASEO_RELAY_HEAL_DELAY_MS",
-             defaults.heal_delay_ms,
-             @heal_delay_ms
-           ),
-         {:ok, heal_rate_per_sec} <-
-           integer(
-             environment,
-             "PASEO_RELAY_HEAL_RATE_PER_SEC",
-             defaults.heal_rate_per_sec,
-             @heal_rate_per_sec
-           ),
-         {:ok, minimum_cluster_size} <-
-           integer(
-             environment,
-             "PASEO_RELAY_MIN_CLUSTER_SIZE",
-             defaults.minimum_cluster_size,
-             1..1_000
-           ) do
-      {:ok,
-       struct!(__MODULE__, %{
-         host: host,
-         ip: ip,
-         port: port,
-         drain: drain,
-         acceptors: acceptors,
-         connections_per_acceptor: connections_per_acceptor,
-         http_idle_timeout_ms: http_idle_timeout_ms,
-         capacity_mutation_timeout_ms: capacity_mutation_timeout_ms,
-         ingress_budget_bytes: ingress_budget_bytes,
-         ingress_weight: ingress_weight,
-         delivery_timeout_ms: delivery_timeout_ms,
-         transport_send_timeout_ms: transport_send_timeout_ms,
-         control_queue_bytes: control_queue_bytes,
-         data_attach_timeout_ms: data_attach_timeout_ms,
-         tcp_receive_buffer_bytes: tcp_receive_buffer_bytes,
-         websocket_max_heap_words: websocket_max_heap_words,
-         memory_watermark_bytes: memory_watermark_bytes,
-         heal_enabled: heal_enabled,
-         heal_delay_ms: heal_delay_ms,
-         heal_rate_per_sec: heal_rate_per_sec,
-         ownership_target:
-           Map.get(environment, "PASEO_RELAY_OWNERSHIP_TARGET", defaults.ownership_target),
-         reroute_header:
-           Map.get(environment, "PASEO_RELAY_REROUTE_HEADER", defaults.reroute_header),
-         minimum_cluster_size: minimum_cluster_size,
-         cluster_query: Map.get(environment, "PASEO_RELAY_CLUSTER_QUERY"),
-         cluster_nodes: cluster_nodes,
-         node_name: Map.get(environment, "RELEASE_NODE"),
-         cookie: Map.get(environment, "RELEASE_COOKIE")
-       })}
+    with {:ok, config} <- read_environment(environment),
+         :ok <- validate_relations(config, &variable/1) do
+      {:ok, ip} = :inet.parse_address(String.to_charlist(config.host))
+      {:ok, %{config | ip: ip}}
     end
   end
 
@@ -196,135 +89,146 @@ defmodule PaseoRelay.Config do
   def normalize(%__MODULE__{} = config), do: config
   def normalize(settings), do: struct!(__MODULE__, Map.new(settings))
 
-  @doc """
-  Validates settings that may change while the node runs.
+  @doc "The fields that are fixed when the node boots."
+  @spec boot_only() :: [atom()]
+  def boot_only, do: @boot_only
 
-  The rules match the environment rules for the same settings. Unknown keys and
-  values of the wrong type are rejected.
+  @doc "The fields that can change while the node runs: every field that is not boot-only."
+  @spec live_keys() :: [atom()]
+  def live_keys, do: for({field, _, _, _} <- @settings, field not in @boot_only, do: field)
+
+  @doc """
+  Returns `config` with the live `settings` applied.
+
+  The rules match the environment rules for the same settings. A boot-only or
+  unknown key, a value of the wrong type and a combination that the environment
+  would reject are errors.
   """
-  @spec validate_live(map()) :: {:ok, map()} | {:error, String.t()}
-  def validate_live(settings) when is_map(settings) do
-    Enum.reduce_while(settings, {:ok, %{}}, fn {key, value}, {:ok, valid} ->
-      case validate_live(key, value) do
-        :ok -> {:cont, {:ok, Map.put(valid, key, value)}}
-        {:error, message} -> {:halt, {:error, message}}
+  @spec put_live(t(), map()) :: {:ok, t()} | {:error, String.t()}
+  def put_live(%__MODULE__{} = config, settings) when is_map(settings) do
+    with :ok <- validate_live(settings),
+         config = struct!(config, settings),
+         :ok <- validate_relations(config, &Atom.to_string/1) do
+      {:ok, config}
+    end
+  end
+
+  @doc "The node-local ceiling for open WebSockets."
+  @spec max_websockets(t()) :: pos_integer()
+  def max_websockets(%__MODULE__{} = config),
+    do: config.acceptors * config.connections_per_acceptor
+
+  defp read_environment(environment) do
+    Enum.reduce_while(@settings, {:ok, defaults()}, fn {field, _default, variable, rule},
+                                                       {:ok, config} ->
+      with {:ok, text} <- Map.fetch(environment, variable),
+           {:ok, value} <- parse(rule, text),
+           true <- valid?(rule, value) do
+        {:cont, {:ok, Map.put(config, field, value)}}
+      else
+        :error when not is_map_key(environment, variable) -> {:cont, {:ok, config}}
+        _invalid -> {:halt, {:error, "#{variable} #{requirement(rule)}"}}
       end
     end)
   end
 
-  defp validate_live(:memory_watermark_bytes, 0), do: :ok
+  defp validate_live(settings) do
+    live = live_keys()
 
-  defp validate_live(:memory_watermark_bytes, value),
-    do: live_integer(:memory_watermark_bytes, value, @memory_watermark_bytes, "0 or ")
+    Enum.find_value(settings, :ok, fn {key, value} ->
+      cond do
+        key not in live -> {:error, "#{inspect(key)} is not a live setting"}
+        valid?(rule(key), value) -> nil
+        true -> {:error, "#{key} #{requirement(rule(key))}"}
+      end
+    end)
+  end
 
-  defp validate_live(:heal_enabled, value) when is_boolean(value), do: :ok
-  defp validate_live(:heal_enabled, _value), do: {:error, "heal_enabled must be true or false"}
+  # Rules between settings. `name` gives each field its environment or live name.
+  defp validate_relations(config, name) do
+    cond do
+      config.ingress_budget_bytes <
+          PaseoRelay.Protocol.maximum_message_payload_bytes() * config.ingress_weight ->
+        {:error,
+         "#{name.(:ingress_budget_bytes)} must admit one maximum assembled message at the configured weight"}
 
-  defp validate_live(:heal_delay_ms, value),
-    do: live_integer(:heal_delay_ms, value, @heal_delay_ms, "")
+      config.delivery_timeout_ms >= config.transport_send_timeout_ms ->
+        {:error,
+         "#{name.(:delivery_timeout_ms)} must be lower than #{name.(:transport_send_timeout_ms)}"}
 
-  defp validate_live(:heal_rate_per_sec, value),
-    do: live_integer(:heal_rate_per_sec, value, @heal_rate_per_sec, "")
+      config.oom_min_available_percent > config.oom_recovery_available_percent ->
+        {:error,
+         "#{name.(:oom_recovery_available_percent)} must not be lower than #{name.(:oom_min_available_percent)}"}
 
-  defp validate_live(key, _value), do: {:error, "#{inspect(key)} is not a live setting"}
-
-  defp live_integer(key, value, range, prefix) do
-    if is_integer(value) and value in range do
-      :ok
-    else
-      {:error, "#{key} must be #{prefix}an integer between #{range.first} and #{range.last}"}
+      true ->
+        :ok
     end
   end
 
-  defp cluster_nodes(environment) do
-    nodes =
-      environment
-      |> Map.get("PASEO_RELAY_CLUSTER_NODES", "")
-      |> String.split(",", trim: true)
-      |> Enum.map(&String.trim/1)
-      |> Enum.uniq()
+  for {field, _default, variable, rule} <- @settings do
+    defp variable(unquote(field)), do: unquote(variable)
+    defp rule(unquote(field)), do: unquote(Macro.escape(rule))
+  end
 
-    if length(nodes) <= 1_000 and
-         Enum.all?(nodes, &(byte_size(&1) <= 255 and Regex.match?(~r/^[^\s@,]+@[^\s@,]+$/, &1))) do
-      {:ok, Enum.map(nodes, &String.to_atom/1)}
-    else
-      {:error,
-       "PASEO_RELAY_CLUSTER_NODES must contain at most 1000 comma-separated name@host peers"}
+  defp parse({:integer, _range}, text), do: parse_integer(text)
+  defp parse({:zero_or_integer, _range}, text), do: parse_integer(text)
+  defp parse({:auto_or_integer, _range}, text) when text in ["", "auto"], do: {:ok, :auto}
+  defp parse({:auto_or_integer, _range}, text), do: parse_integer(text)
+  defp parse(:boolean, "true"), do: {:ok, true}
+  defp parse(:boolean, "false"), do: {:ok, false}
+  defp parse(:boolean, _text), do: :error
+
+  defp parse(:nodes, text) do
+    names = text |> String.split(",", trim: true) |> Enum.map(&String.trim/1) |> Enum.uniq()
+
+    # Checked before the names become atoms.
+    if node_names?(names), do: {:ok, Enum.map(names, &String.to_atom/1)}, else: :error
+  end
+
+  defp parse(_text_rule, text), do: {:ok, text}
+
+  defp parse_integer(text) do
+    case Integer.parse(text) do
+      {integer, ""} -> {:ok, integer}
+      _not_an_integer -> :error
     end
   end
 
-  defp ip(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, address} -> {:ok, address}
-      {:error, :einval} -> {:error, "PASEO_RELAY_HOST must be an IP address"}
-    end
+  defp valid?({:integer, range}, value), do: is_integer(value) and value in range
+
+  defp valid?({:zero_or_integer, range}, value),
+    do: value == 0 or valid?({:integer, range}, value)
+
+  defp valid?({:auto_or_integer, range}, value),
+    do: value == :auto or valid?({:integer, range}, value)
+
+  defp valid?(:boolean, value), do: is_boolean(value)
+  defp valid?(:string, value), do: is_binary(value)
+  defp valid?(:optional_string, value), do: value == nil or is_binary(value)
+
+  defp valid?(:ip_address, value),
+    do: is_binary(value) and match?({:ok, _ip}, :inet.parse_address(String.to_charlist(value)))
+
+  defp valid?(:nodes, value),
+    do:
+      is_list(value) and Enum.all?(value, &is_atom/1) and
+        node_names?(Enum.map(value, &Atom.to_string/1))
+
+  defp node_names?(names) do
+    length(names) <= 1_000 and
+      Enum.all?(names, &(byte_size(&1) <= 255 and Regex.match?(~r/^[^\s@,]+@[^\s@,]+$/, &1)))
   end
 
-  defp port(environment, key, default) do
-    case Map.get(environment, key) do
-      nil ->
-        {:ok, default}
+  defp requirement({:integer, range}),
+    do: "must be an integer between #{range.first} and #{range.last}"
 
-      value ->
-        case Integer.parse(value) do
-          {port, ""} when port in 1..65_535 -> {:ok, port}
-          _ -> {:error, "#{key} must be an integer between 1 and 65535"}
-        end
-    end
-  end
+  defp requirement({:zero_or_integer, range}), do: "must be 0 or #{between(range)}"
+  defp requirement({:auto_or_integer, range}), do: "must be auto or #{between(range)}"
+  defp requirement(:boolean), do: "must be true or false"
+  defp requirement(:string), do: "must be a string"
+  defp requirement(:optional_string), do: "must be a string"
+  defp requirement(:ip_address), do: "must be an IP address"
+  defp requirement(:nodes), do: "must contain at most 1000 comma-separated name@host peers"
 
-  defp integer(environment, key, default, range) do
-    case Map.get(environment, key) do
-      nil ->
-        {:ok, default}
-
-      value ->
-        case Integer.parse(value) do
-          {integer, ""} ->
-            if integer in range do
-              {:ok, integer}
-            else
-              {:error, "#{key} must be an integer between #{range.first} and #{range.last}"}
-            end
-
-          _ ->
-            {:error, "#{key} must be an integer between #{range.first} and #{range.last}"}
-        end
-    end
-  end
-
-  defp boolean(environment, key, default) do
-    case Map.get(environment, key) do
-      nil -> {:ok, default}
-      "true" -> {:ok, true}
-      "false" -> {:ok, false}
-      _ -> {:error, "#{key} must be true or false"}
-    end
-  end
-
-  defp disabled_or_integer(environment, key, default, range) do
-    case Map.get(environment, key) do
-      nil -> {:ok, default}
-      "0" -> {:ok, 0}
-      _value -> integer(environment, key, default, range)
-    end
-  end
-
-  defp validate_ingress_budget(budget, weight) do
-    if budget >= PaseoRelay.Protocol.maximum_message_payload_bytes() * weight do
-      :ok
-    else
-      {:error,
-       "PASEO_RELAY_INGRESS_BUDGET_BYTES must admit one maximum assembled message at the configured weight"}
-    end
-  end
-
-  defp validate_delivery_timeouts(delivery_timeout_ms, transport_send_timeout_ms) do
-    if delivery_timeout_ms < transport_send_timeout_ms do
-      :ok
-    else
-      {:error,
-       "PASEO_RELAY_DELIVERY_TIMEOUT_MS must be lower than PASEO_RELAY_TRANSPORT_SEND_TIMEOUT_MS"}
-    end
-  end
+  defp between(range), do: "an integer between #{range.first} and #{range.last}"
 end

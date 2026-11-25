@@ -7,14 +7,54 @@ defmodule PaseoRelay.ConfigTest do
     assert Config.load([]) == {:ok, Config.defaults()}
   end
 
-  test "defaults to a 1 MiB WAN receive buffer and permits a bounded rollback" do
-    assert {:ok, %{tcp_receive_buffer_bytes: 1_048_576}} = Config.load([])
+  test "leaves the receive buffer to the kernel and fixes the user-space buffer" do
+    assert {:ok, %{tcp_receive_buffer_bytes: :auto, tcp_user_buffer_bytes: 65_536}} =
+             Config.load([])
 
-    assert {:ok, %{tcp_receive_buffer_bytes: 65_536}} =
-             Config.load([{"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", "65536"}])
+    for automatic <- ["auto", ""] do
+      assert {:ok, %{tcp_receive_buffer_bytes: :auto}} =
+               Config.load([{"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", automatic}])
+    end
 
-    assert {:error, _} =
-             Config.load([{"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", "1048577"}])
+    assert {:ok, %{tcp_receive_buffer_bytes: 1_048_576, tcp_user_buffer_bytes: 32_768}} =
+             Config.load([
+               {"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", "1048576"},
+               {"PASEO_RELAY_TCP_USER_BUFFER_BYTES", "32768"}
+             ])
+
+    assert Config.load([{"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", "1048577"}]) ==
+             {:error,
+              "PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES must be auto or an integer between 4096 and 1048576"}
+
+    assert Config.load([{"PASEO_RELAY_TCP_USER_BUFFER_BYTES", "4095"}]) ==
+             {:error,
+              "PASEO_RELAY_TCP_USER_BUFFER_BYTES must be an integer between 4096 and 1048576"}
+  end
+
+  test "admits 50,000 WebSockets by default" do
+    assert %{acceptors: 100, connections_per_acceptor: 500} = Config.defaults()
+    assert Config.max_websockets(Config.defaults()) == 50_000
+  end
+
+  test "loads and validates the OOM guard as percentages of total memory" do
+    assert %{oom_min_available_percent: 10, oom_recovery_available_percent: 15} =
+             Config.defaults()
+
+    assert {:ok, %{oom_min_available_percent: 0}} =
+             Config.load([{"PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT", "0"}])
+
+    assert {:ok, %{oom_min_available_percent: 5, oom_recovery_available_percent: 8}} =
+             Config.load([
+               {"PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT", "5"},
+               {"PASEO_RELAY_OOM_RECOVERY_AVAILABLE_PERCENT", "8"}
+             ])
+
+    assert Config.load([{"PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT", "51"}]) ==
+             {:error, "PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT must be an integer between 0 and 50"}
+
+    assert Config.load([{"PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT", "20"}]) ==
+             {:error,
+              "PASEO_RELAY_OOM_RECOVERY_AVAILABLE_PERCENT must not be lower than PASEO_RELAY_OOM_MIN_AVAILABLE_PERCENT"}
   end
 
   test "loads and validates the Capacity mutation timeout" do
@@ -149,5 +189,29 @@ defmodule PaseoRelay.ConfigTest do
 
     assert Config.load([{"PASEO_RELAY_HEAL_RATE_PER_SEC", "501"}]) ==
              {:error, "PASEO_RELAY_HEAL_RATE_PER_SEC must be an integer between 1 and 500"}
+  end
+
+  test "loads and validates the heal attempt window, the cooldown and the home idle limit" do
+    assert %{
+             heal_attempt_window_ms: 120_000,
+             heal_cooldown_ms: 1_800_000,
+             home_max_idle_ms: 604_800_000
+           } = Config.defaults()
+
+    assert {:ok,
+            %{heal_attempt_window_ms: 60_000, heal_cooldown_ms: 0, home_max_idle_ms: 86_400_000}} =
+             Config.load([
+               {"PASEO_RELAY_HEAL_ATTEMPT_WINDOW_MS", "60000"},
+               {"PASEO_RELAY_HEAL_COOLDOWN_MS", "0"},
+               {"PASEO_RELAY_HOME_MAX_IDLE_MS", "86400000"}
+             ])
+
+    assert Config.load([{"PASEO_RELAY_HEAL_ATTEMPT_WINDOW_MS", "999"}]) ==
+             {:error,
+              "PASEO_RELAY_HEAL_ATTEMPT_WINDOW_MS must be an integer between 1000 and 86400000"}
+
+    assert Config.load([{"PASEO_RELAY_HOME_MAX_IDLE_MS", "999"}]) ==
+             {:error,
+              "PASEO_RELAY_HOME_MAX_IDLE_MS must be an integer between 1000 and 7776000000"}
   end
 end

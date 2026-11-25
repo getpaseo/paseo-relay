@@ -24,6 +24,26 @@ defmodule PaseoRelay.StaticClusterTest do
     await_connection(peer_node)
   end
 
+  test "a peer added to the live settings is connected without a restart" do
+    {:ok, peer, peer_node} =
+      :peer.start(%{
+        name: :"static_live_peer_#{System.unique_integer([:positive])}",
+        connection: :standard_io,
+        args: [~c"+S", ~c"2", ~c"-setcookie", Atom.to_charlist(Node.get_cookie())]
+      })
+
+    on_exit(fn -> :peer.stop(peer) end)
+    live = PaseoRelay.RuntimeConfig.get()
+    on_exit(fn -> {:ok, _settings} = PaseoRelay.RuntimeConfig.put(live) end)
+
+    start_supervised!({PaseoRelay.StaticCluster, interval: 50})
+    Process.sleep(150)
+    refute peer_node in Node.list()
+
+    assert {:ok, _settings} = PaseoRelay.RuntimeConfig.put(%{cluster_nodes: [peer_node]})
+    await_connection(peer_node)
+  end
+
   test "the static peer boundary rejects malformed node names" do
     assert {:ok, %{cluster_nodes: []}} = PaseoRelay.Config.load(%{})
 

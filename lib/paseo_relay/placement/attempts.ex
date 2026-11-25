@@ -15,6 +15,10 @@ defmodule PaseoRelay.Placement.Attempts do
 
   def new(window_ms, cooldown_ms), do: %__MODULE__{window_ms: window_ms, cooldown_ms: cooldown_ms}
 
+  @doc "Changes the window and the cooldown. Recorded attempts keep their times."
+  def configure(%__MODULE__{} = attempts, window_ms, cooldown_ms),
+    do: %{attempts | window_ms: window_ms, cooldown_ms: cooldown_ms}
+
   @doc "Returns whether `server_id` may be healed at `now`."
   def may_heal?(%__MODULE__{} = attempts, server_id, now) do
     case attempts.by_server[server_id] do

@@ -9,20 +9,20 @@ defmodule PaseoRelay.Placement do
   the session Owner. The daemon then reconnects and claims its home again.
 
   Callers use only this module. `Owner` reports its lifecycle and client count,
-  `Socket` reports direct daemon arrivals, and `RuntimeConfig` changes the heal
-  settings.
+  `Socket` reports direct daemon arrivals. The heal settings are live: the
+  server reads `RuntimeConfig` on each tick.
   """
 
   alias PaseoRelay.Placement.Homes
   alias PaseoRelay.Placement.Server
   alias PaseoRelay.Placement.Sessions
 
-  def child_spec(config) do
-    %{id: __MODULE__, type: :supervisor, start: {__MODULE__, :start_link, [config]}}
+  def child_spec(_options) do
+    %{id: __MODULE__, type: :supervisor, start: {__MODULE__, :start_link, []}}
   end
 
-  def start_link(config) do
-    Supervisor.start_link([Sessions, {Server, config}],
+  def start_link do
+    Supervisor.start_link([Sessions, Server],
       strategy: :one_for_one,
       name: PaseoRelay.Placement.Supervisor
     )
@@ -42,18 +42,6 @@ defmodule PaseoRelay.Placement do
       if home(server_id) in [nil, local], do: count, else: count + 1
     end)
   end
-
-  @doc "Returns the heal settings that this node applies now."
-  def settings, do: Server.settings()
-
-  @doc """
-  Applies the stored heal settings from `RuntimeConfig`. Returns `:ok`, or
-  `{:error, :unavailable}` when Placement did not answer in time.
-  """
-  def reload_settings, do: Server.reload_settings()
-
-  @doc "Asks Placement to apply the stored heal settings, without waiting."
-  def request_reload, do: Server.request_reload()
 
   # Owner lifecycle. Each call writes the calling Owner's entry.
   def session_started(server_id), do: Sessions.track(server_id, self(), 0)

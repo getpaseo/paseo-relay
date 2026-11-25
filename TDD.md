@@ -811,3 +811,69 @@
   all-green release gate. Raw logs and baseline source are retained under
   `.artifacts/receive-buffer-change/`.
 - Focused configuration and real-listener verification passed 20/20.
+
+## Live settings by default, OOM guard and socket buffers
+
+- Problem: a node needed a restart for most settings; the memory guard needed a
+  BEAM byte limit for each host; and the 1 MiB default `recbuf` without an
+  explicit `buffer` turned off the kernel's receive sizing and raised the
+  user-space buffer of each socket to 1 MiB.
+- Red against `HEAD`: the new and changed tests in the system memory, config,
+  runtime config, listener and static cluster suites passed 16 of 48.
+  `PaseoRelay.SystemMemory` did not exist. `Config` had no
+  `tcp_user_buffer_bytes`, OOM percentages, heal attempt window, cooldown or
+  home idle limit, kept `connections_per_acceptor` at 200 and rejected `auto`
+  for the receive buffer. `RuntimeConfig.put/1` rejected every key outside its
+  four-key list, and `Config` had no `boot_only/0` or `live_keys/0` for the
+  guard test. The default listener had no `buffer` socket option, and a listener
+  with an explicit `recbuf` read `buffer: 1048576`. StaticCluster needed a
+  fixed `nodes` option. The OOM guard tests shed nothing, because Capacity only
+  compared BEAM memory with a byte watermark.
+- Red for container file cache: `SystemMemory.parse/4` was undefined, and a
+  container with 512 MiB of room and 1 GiB of file cache read 1073741824
+  available bytes instead of 1610612736 (6 of 8).
+- Green, settings: `Config` is one table of field, default, environment variable
+  and rule. A field is live unless `boot_only/0` lists it. The guard test fails
+  when a new field has no entry in its change table and is not boot only, and it
+  puts and reads back every live key on a running node.
+- Green, application: `RuntimeConfig.put/1` validates with the environment rules,
+  hands Capacity its settings with a GenServer call, stores the config in
+  `:persistent_term` and the application environment, and then updates Ranch
+  and the open sockets. Tests on the real listener prove that an open daemon
+  WebSocket answers a ping after a change of every live setting, that an open
+  socket and a later socket read the new `buffer` and `send_timeout`, that a
+  full node admits again after a higher ceiling, and that a rejected change and
+  a Capacity timeout leave every value as it was. A change of a setting that
+  Capacity does not hold succeeds while Capacity is stalled. A restarted
+  listener starts with the live values.
+- Green, guard: with fixture memory files, Capacity sheds when the available
+  memory is below 10 percent of the total, keeps admission paused between 10
+  and 15 percent, and admits again at 15 percent. A container limit bounds the
+  total and the available memory. `0` disables the guard, and a watermark above
+  0 replaces it. The three new gauges report the reading and the floor.
+- Green, buffers: the default listen socket reads `buffer: 65536` and has no
+  `recbuf` option. An explicit receive buffer keeps the explicit user buffer.
+- Removed with their callers: `Drain`'s Agent, `Placement.reload_settings/0` and
+  `settings/0`, `RuntimeConfig.overlay/1`, the per-namespace limit in Capacity
+  and its `:configuration_mismatch` reply. Placement, StaticCluster, the socket
+  handler and the operations endpoints read the live config where they use it.
+- Limits: a socket with an explicit kernel receive buffer cannot return to
+  kernel sizing, so `tcp_receive_buffer_bytes: :auto` applies to the sockets of
+  a listener that starts later. `http_idle_timeout_ms`, `control_queue_bytes`
+  and `websocket_max_heap_words` apply to new connections. The guard reads
+  cgroup v2 only.
+- Test repairs: the placement tests used `Placement.settings/0` as a barrier
+  and now use a system call to the Placement server. The router metrics test
+  read the first sync frame with a second `recv` and timed out when the frame
+  arrived with the upgrade response; it now accepts both orders.
+- Verification: `scripts/ci.sh` passed: format, warnings as errors, the full
+  suite (150 passed), the production release and the container health,
+  readiness, metrics and restart checks.
+- Red, socket loop: a change of only `connections_per_acceptor` and
+  `http_idle_timeout_ms` wrote the socket options of every open socket again.
+  A socket with a `send_timeout` of 12345 that no setting holds read 35000
+  after the change (10 of 11). On a full node that loop is longer than an RPC
+  timeout.
+- Green: the listener calls the open sockets only when `buffer`, `recbuf` or
+  `send_timeout` changed. The socket keeps 12345 after the ceiling change and
+  reads 40000 after a change of `transport_send_timeout_ms`.
