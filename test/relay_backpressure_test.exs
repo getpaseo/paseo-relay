@@ -221,9 +221,12 @@ defmodule PaseoRelay.BackpressureTest do
 
   @tag timeout: 90_000
   test "completed messages cannot exceed the strict node byte budget" do
-    port = start_relay(data_attach_timeout: 60_000)
+    port =
+      start_relay(data_attach_timeout: 60_000, delivery_timeout: 60_000, send_timeout: 65_000)
+
     baseline = PaseoRelay.Metrics.value(:active_websockets)
     payload = :binary.copy(<<0x5A>>, @maximum_message_payload_bytes)
+    digest = :crypto.hash(:sha256, payload)
 
     sockets =
       Enum.map(1..5, fn index ->
@@ -247,8 +250,6 @@ defmodule PaseoRelay.BackpressureTest do
     assert :ok = send_frame(rejected, :binary, payload)
     assert {:close, 1013, "Relay ingress capacity"} = recv_server_frame(rejected)
     assert PaseoRelay.Capacity.value(:ingress_reserved_bytes) == limit
-
-    digest = :crypto.hash(:sha256, payload)
 
     destinations =
       Enum.map(1..4, fn index ->
@@ -1441,12 +1442,20 @@ defmodule PaseoRelay.BackpressureTest do
   end
 
   defp recv_headers(socket, acc) do
-    if String.contains?(acc, "\r\n\r\n") do
-      {:ok, acc}
-    else
-      with {:ok, data} <- :gen_tcp.recv(socket, 0, 2_000) do
-        recv_headers(socket, acc <> data)
+    with :ok <- :inet.setopts(socket, packet: :line) do
+      try do
+        recv_header_lines(socket, acc)
+      after
+        _ = :inet.setopts(socket, packet: :raw)
       end
+    end
+  end
+
+  defp recv_header_lines(socket, acc) do
+    case :gen_tcp.recv(socket, 0, 2_000) do
+      {:ok, "\r\n"} -> {:ok, acc <> "\r\n"}
+      {:ok, line} -> recv_header_lines(socket, acc <> line)
+      error -> error
     end
   end
 
