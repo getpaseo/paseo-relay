@@ -29,7 +29,13 @@ defmodule PaseoRelay.Metrics do
     {:max_frame_bytes, :gauge, "max_frame_bytes",
      "Largest WebSocket frame payload observed since node start."},
     {:memory_watermark_bytes, :gauge, "memory_watermark_bytes",
-     "BEAM memory watermark that Capacity applies now; 0 means disabled."},
+     "BEAM memory watermark that Capacity applies now; 0 means that the OOM guard decides."},
+    {:system_memory_total_bytes, :gauge, "system_memory_total_bytes",
+     "Memory of the host, or the container limit when it is lower; 0 when unreadable."},
+    {:system_memory_available_bytes, :gauge, "system_memory_available_bytes",
+     "Memory that the host or the container can still give; 0 when unreadable."},
+    {:oom_floor_bytes, :gauge, "oom_floor_bytes",
+     "Available memory below which the OOM guard sheds WebSockets; 0 means disabled."},
     {:misplaced_sessions, :gauge, "misplaced_sessions",
      "Sessions owned by this node whose home is another node."},
     {:sessions_healed, :counter, "sessions_healed_total",
@@ -60,8 +66,9 @@ defmodule PaseoRelay.Metrics do
     {@maximum_message_payload_bytes, :frame_size_le_32m,
      Integer.to_string(@maximum_message_payload_bytes)}
   ]
-  @computed_names ~w(active_websockets active_sessions ingress_reserved_bytes inflight_delivery_bytes backpressured_sources memory_watermark_bytes misplaced_sessions max_frame_bytes beam_total_memory beam_process_memory beam_binary_memory beam_ets_memory)a
-  @capacity_names ~w(active_websockets ingress_reserved_bytes inflight_delivery_bytes backpressured_sources memory_watermark_bytes)a
+  @capacity_names ~w(active_websockets ingress_reserved_bytes inflight_delivery_bytes backpressured_sources memory_watermark_bytes system_memory_total_bytes system_memory_available_bytes oom_floor_bytes)a
+  @computed_names @capacity_names ++
+                    ~w(active_sessions misplaced_sessions max_frame_bytes beam_total_memory beam_process_memory beam_binary_memory beam_ets_memory)a
   @handshake_outcomes [:accepted, :rejected]
   @handshake_versions [1, 2]
   @handshake_types [:hello, :e2ee_hello]
@@ -85,15 +92,7 @@ defmodule PaseoRelay.Metrics do
   def inc(name, amount \\ 1), do: :counters.add(counters(), index(name), amount)
   def dec(name, amount \\ 1), do: inc(name, -amount)
 
-  def value(name)
-      when name in [
-             :active_websockets,
-             :ingress_reserved_bytes,
-             :inflight_delivery_bytes,
-             :backpressured_sources,
-             :memory_watermark_bytes
-           ],
-      do: PaseoRelay.Capacity.value(name)
+  def value(name) when name in @capacity_names, do: PaseoRelay.Capacity.value(name)
 
   def value(:misplaced_sessions), do: PaseoRelay.Placement.misplaced_sessions()
   def value(:active_sessions), do: :syn.local_registry_count(:paseo_relay_owners)

@@ -9,7 +9,17 @@ defmodule PaseoRelay.Capacity do
   @pressure_recheck_ms 100
   @initial_max_shed_batch 64
   @max_shed_batch 1_024
-  def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
+
+  # The settings that Capacity holds. `reconfigure/2` gives it their changes.
+  @settings [
+    :ingress_budget_bytes,
+    :ingress_weight,
+    :memory_watermark_bytes,
+    :oom_min_available_percent,
+    :oom_recovery_available_percent
+  ]
+
+  def start_link(_options), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   def admit_connection(namespace, limit, timeout) do
     admit_connection(namespace, limit, self(), timeout)
@@ -46,19 +56,32 @@ defmodule PaseoRelay.Capacity do
 
   def check_now(timeout), do: mutate(:check_now, {:error, :unavailable}, timeout)
 
-  def set_watermark(bytes, timeout),
-    do: mutate({:set_watermark, bytes}, {:error, :unavailable}, timeout)
+  @doc """
+  Gives Capacity the settings that differ between `previous` and `config`.
+  Makes no call when none of its settings changed.
+  """
+  def reconfigure(previous, config) do
+    settings = Map.take(config, @settings)
+
+    if settings == Map.take(previous, @settings),
+      do: :ok,
+      else: configure(settings, config.capacity_mutation_timeout_ms)
+  end
+
+  @doc "Sets the BEAM watermark of this Capacity process only, without storing it."
+  def set_watermark(bytes, timeout), do: configure(%{memory_watermark_bytes: bytes}, timeout)
+
+  defp configure(settings, timeout),
+    do: mutate({:configure, settings}, {:error, :unavailable}, timeout)
 
   @impl true
-  def init(config) do
-    config = PaseoRelay.RuntimeConfig.overlay(config)
+  def init(:ok) do
     schedule_check()
 
     {:ok,
      %{
-       ingress_limit: config.ingress_budget_bytes,
-       ingress_weight: config.ingress_weight,
-       watermark: config.memory_watermark_bytes,
+       settings: Map.take(PaseoRelay.RuntimeConfig.current(), @settings),
+       memory: PaseoRelay.SystemMemory.read(),
        namespaces: %{},
        connections: %{},
        sockets: %{},
@@ -78,7 +101,9 @@ defmodule PaseoRelay.Capacity do
 
   @impl true
   def handle_call({:admit_connection, namespace, limit, holder}, from, state) do
-    namespace_state = Map.get(state.namespaces, namespace, %{limit: limit, active: 0})
+    # The caller gives the ceiling with each call, so a changed ceiling applies
+    # to the next admission and never to an open connection.
+    active = Map.get(state.namespaces, namespace, 0)
 
     cond do
       not live_local?(caller_pid(from)) or not live_local?(holder) ->
@@ -87,17 +112,13 @@ defmodule PaseoRelay.Capacity do
       state.pressure != nil ->
         {:reply, {:error, :pressure}, state}
 
-      namespace_state.limit != limit ->
-        {:reply, {:error, :configuration_mismatch}, state}
-
-      namespace_state.active >= limit ->
+      active >= limit ->
         {:reply, {:error, :capacity}, state}
 
       true ->
         token = make_ref()
         timer = Process.send_after(self(), {:expire, token}, @reservation_timeout_ms)
         monitor = Process.monitor(holder)
-        namespace_state = %{namespace_state | active: namespace_state.active + 1}
 
         connection = %{
           namespace: namespace,
@@ -109,7 +130,7 @@ defmodule PaseoRelay.Capacity do
         {:reply, {:ok, token},
          %{
            state
-           | namespaces: Map.put(state.namespaces, namespace, namespace_state),
+           | namespaces: Map.put(state.namespaces, namespace, active + 1),
              connections: Map.put(state.connections, token, connection),
              monitors: Map.put(state.monitors, monitor, token)
          }}
@@ -152,12 +173,11 @@ defmodule PaseoRelay.Capacity do
   end
 
   def handle_call({:active_connections, namespace}, _from, state) do
-    active = state.namespaces |> Map.get(namespace, %{active: 0}) |> Map.fetch!(:active)
-    {:reply, active, state}
+    {:reply, Map.get(state.namespaces, namespace, 0), state}
   end
 
   def handle_call({:admit_message, socket, payload_bytes}, from, state) do
-    weighted_bytes = payload_bytes * state.ingress_weight
+    weighted_bytes = payload_bytes * state.settings.ingress_weight
 
     cond do
       not caller?(from, socket) ->
@@ -172,10 +192,10 @@ defmodule PaseoRelay.Capacity do
       state.pressure != nil ->
         {:reply, {:error, :pressure}, state}
 
-      weighted_bytes > state.ingress_limit ->
+      weighted_bytes > state.settings.ingress_budget_bytes ->
         {:reply, {:error, :message_exceeds_budget}, state}
 
-      state.reserved_bytes + weighted_bytes > state.ingress_limit ->
+      state.reserved_bytes + weighted_bytes > state.settings.ingress_budget_bytes ->
         {:reply, {:error, :budget_exhausted}, state}
 
       true ->
@@ -236,20 +256,8 @@ defmodule PaseoRelay.Capacity do
     end
   end
 
-  def handle_call({:value, :active_websockets}, _from, state),
-    do: {:reply, state.active_websockets, state}
-
-  def handle_call({:value, :ingress_reserved_bytes}, _from, state),
-    do: {:reply, state.reserved_bytes, state}
-
-  def handle_call({:value, :inflight_delivery_bytes}, _from, state),
-    do: {:reply, state.inflight_bytes, state}
-
-  def handle_call({:value, :backpressured_sources}, _from, state),
-    do: {:reply, state.blocked_sources, state}
-
-  def handle_call({:value, :memory_watermark_bytes}, _from, state),
-    do: {:reply, state.watermark, state}
+  def handle_call({:value, name}, _from, state),
+    do: {:reply, Map.fetch!(gauges(state), name), state}
 
   def handle_call(:snapshot, _from, state), do: {:reply, gauges(state), state}
 
@@ -264,11 +272,13 @@ defmodule PaseoRelay.Capacity do
 
   def handle_call(:check_now, _from, state), do: {:reply, :ok, shed_if_needed(state)}
 
-  def handle_call({:set_watermark, 0}, _from, state),
-    do: {:reply, :ok, %{state | watermark: 0, pressure: nil}}
-
-  def handle_call({:set_watermark, bytes}, _from, state),
-    do: {:reply, :ok, %{state | watermark: bytes}}
+  # Pressure belongs to one guard. A change of guard starts without pressure,
+  # and the next check decides again.
+  def handle_call({:configure, settings}, _from, state) do
+    settings = Map.merge(state.settings, settings)
+    pressure = if guard(settings) == guard(state.settings), do: state.pressure
+    {:reply, :ok, %{state | settings: settings, pressure: pressure}}
+  end
 
   @impl true
   def handle_cast({:release_connection, token}, state) do
@@ -360,13 +370,12 @@ defmodule PaseoRelay.Capacity do
         state
 
       {%{namespace: namespace}, connections} ->
-        namespace_state = Map.fetch!(state.namespaces, namespace)
-        active = namespace_state.active - 1
+        active = Map.fetch!(state.namespaces, namespace) - 1
 
         namespaces =
           if active == 0,
             do: Map.delete(state.namespaces, namespace),
-            else: Map.put(state.namespaces, namespace, %{namespace_state | active: active})
+            else: Map.put(state.namespaces, namespace, active)
 
         %{state | namespaces: namespaces, connections: connections}
     end
@@ -435,28 +444,56 @@ defmodule PaseoRelay.Capacity do
   defp ensure_blocked(state, _socket, %{blocked_key: key}), do: {key, state}
 
   defp shed_if_needed(state) do
-    memory = :erlang.memory(:total)
-    recovery = recovery_threshold(state.watermark)
+    state = %{state | memory: PaseoRelay.SystemMemory.read()}
 
-    cond do
-      state.watermark == 0 ->
+    case levels(state) do
+      :off ->
         %{state | pressure: nil}
 
-      state.pressure != nil and memory <= recovery ->
+      {memory, _watermark, recovery} when state.pressure != nil and memory <= recovery ->
         %{state | pressure: nil}
 
-      memory >= state.watermark or state.pressure != nil ->
-        batch_size = pressure_batch(state.pressure, memory, recovery, state.watermark)
+      {memory, watermark, recovery} when memory >= watermark or state.pressure != nil ->
+        batch_size = pressure_batch(state.pressure, memory, recovery, watermark)
         {state, victims} = shed_candidates(state, batch_size, 0)
 
         state
         |> Map.put(:pressure, %{memory: memory, victims: victims, batch: batch_size})
         |> schedule_pressure_recheck()
 
-      true ->
+      _below_watermark ->
         state
     end
   end
+
+  # The guard that the settings select. An explicit BEAM watermark replaces the
+  # OOM guard, and a 0 floor disables the OOM guard.
+  defp guard(%{memory_watermark_bytes: watermark}) when watermark > 0, do: :watermark
+  defp guard(%{oom_min_available_percent: percent}) when percent > 0, do: :oom
+  defp guard(_settings), do: :off
+
+  # {memory in use, the level at which shedding starts, the level at which it ends}
+  defp levels(%{settings: settings, memory: memory}) do
+    case {guard(settings), memory} do
+      {:watermark, _memory} ->
+        watermark = settings.memory_watermark_bytes
+
+        {:erlang.memory(:total), watermark,
+         max(watermark - PaseoRelay.Protocol.maximum_message_payload_bytes(), 0)}
+
+      {:oom, {:ok, %{total_bytes: total, available_bytes: available}}} ->
+        # Shedding starts when the available memory is below the floor, so the
+        # level in use is one byte above `total - floor`.
+        {total - available, total - percent(total, settings.oom_min_available_percent) + 1,
+         total - percent(total, settings.oom_recovery_available_percent)}
+
+      # No guard, or a system that does not report its memory.
+      _off ->
+        :off
+    end
+  end
+
+  defp percent(bytes, percent), do: div(bytes * percent, 100)
 
   defp pressure_batch(nil, memory, _recovery, watermark) do
     maximum_message = PaseoRelay.Protocol.maximum_message_payload_bytes()
@@ -487,12 +524,6 @@ defmodule PaseoRelay.Capacity do
       |> max(1)
       |> min(@max_shed_batch)
     end
-  end
-
-  defp recovery_threshold(0), do: 0
-
-  defp recovery_threshold(watermark) do
-    max(watermark - PaseoRelay.Protocol.maximum_message_payload_bytes(), 0)
   end
 
   defp shed_candidates(state, 0, victims), do: {state, victims}
@@ -574,23 +605,33 @@ defmodule PaseoRelay.Capacity do
     {{System.monotonic_time(), sequence}, %{state | sequence: sequence}}
   end
 
-  defp gauges(state) do
+  defp gauges(%{settings: settings} = state) do
+    {total, available} =
+      case state.memory do
+        {:ok, memory} -> {memory.total_bytes, memory.available_bytes}
+        :unavailable -> {0, 0}
+      end
+
     %{
       active_websockets: state.active_websockets,
       ingress_reserved_bytes: state.reserved_bytes,
       inflight_delivery_bytes: state.inflight_bytes,
       backpressured_sources: state.blocked_sources,
-      memory_watermark_bytes: state.watermark
+      memory_watermark_bytes: settings.memory_watermark_bytes,
+      system_memory_total_bytes: total,
+      system_memory_available_bytes: available,
+      oom_floor_bytes:
+        if(guard(settings) == :oom,
+          do: percent(total, settings.oom_min_available_percent),
+          else: 0
+        )
     }
   end
 
   defp admission_state(state, namespace, limit) do
-    namespace_state = Map.get(state.namespaces, namespace, %{limit: limit, active: 0})
-
     cond do
       state.pressure != nil -> :pressure
-      namespace_state.limit != limit -> :configuration_mismatch
-      namespace_state.active >= limit -> :connection_capacity
+      Map.get(state.namespaces, namespace, 0) >= limit -> :connection_capacity
       true -> :open
     end
   end

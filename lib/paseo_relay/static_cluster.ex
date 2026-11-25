@@ -1,5 +1,9 @@
 defmodule PaseoRelay.StaticCluster do
-  @moduledoc "Connects configured BEAM peers independently of DNS discovery."
+  @moduledoc """
+  Connects configured BEAM peers independently of DNS discovery.
+
+  Without the `nodes` option, each round connects the live `cluster_nodes`.
+  """
   use GenServer
 
   def start_link(options), do: GenServer.start_link(__MODULE__, options)
@@ -7,7 +11,7 @@ defmodule PaseoRelay.StaticCluster do
   @impl true
   def init(options) do
     state = %{
-      nodes: Keyword.fetch!(options, :nodes),
+      nodes: Keyword.get(options, :nodes),
       interval: Keyword.get(options, :interval, 5_000)
     }
 
@@ -17,7 +21,9 @@ defmodule PaseoRelay.StaticCluster do
 
   @impl true
   def handle_info(:connect, state) do
-    for peer <- state.nodes, peer != node(), peer not in Node.list() do
+    nodes = state.nodes || PaseoRelay.RuntimeConfig.current().cluster_nodes
+
+    for peer <- nodes, peer != node(), peer not in Node.list() do
       Node.connect(peer)
     end
 

@@ -3,13 +3,13 @@ defmodule PaseoRelay.RuntimeSupervisor do
 
   use Supervisor
 
-  def start_link(config), do: Supervisor.start_link(__MODULE__, config, name: __MODULE__)
+  def start_link(_options), do: Supervisor.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @impl true
-  def init(config) do
+  def init(:ok) do
     children = [
-      {PaseoRelay.Capacity, config},
-      {PaseoRelay.Listener, ref: PaseoRelay.Listener, config: config}
+      PaseoRelay.Capacity,
+      {PaseoRelay.Listener, ref: PaseoRelay.Listener}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

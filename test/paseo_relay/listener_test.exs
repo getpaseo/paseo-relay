@@ -28,9 +28,10 @@ defmodule PaseoRelay.ListenerTest do
        max_connections: 10}
     )
 
-    # Assert the actual Ranch listener receives the configured WAN buffer.
-    # Kernel getsockopt values depend on host limits and Linux doubles SO_RCVBUF.
-    assert :ranch.get_transport_options(listener).socket_opts[:recbuf] == 1_048_576
+    # The kernel sizes the receive buffer. The user-space buffer is fixed.
+    socket_options = :ranch.get_transport_options(listener).socket_opts
+    assert socket_options[:buffer] == 65_536
+    refute Keyword.has_key?(socket_options, :recbuf)
 
     port = PaseoRelay.Listener.port(listener)
     {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
@@ -39,6 +40,36 @@ defmodule PaseoRelay.ListenerTest do
 
     assert response =~ "HTTP/1.1 200 OK"
     assert response =~ ~s({"status":"ok"})
+  end
+
+  test "an explicit receive buffer does not raise the user-space buffer of a socket" do
+    listener = {:listener_receive_buffer, System.unique_integer([:positive])}
+
+    start_supervised!(
+      {PaseoRelay.Listener,
+       ref: listener,
+       config: PaseoRelay.Config.defaults(),
+       ip: {127, 0, 0, 1},
+       port: 0,
+       acceptors: 1,
+       max_connections: 10,
+       receive_buffer_bytes: 1_048_576}
+    )
+
+    assert :ranch.get_transport_options(listener).socket_opts[:recbuf] == 1_048_576
+
+    port = PaseoRelay.Listener.port(listener)
+    assert http_get(port, "/health") =~ "HTTP/1.1 200 OK"
+    {:ok, client} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+    on_exit(fn -> :gen_tcp.close(client) end)
+    assert_eventually(fn -> length(:ranch.procs(listener, :connections)) == 1 end)
+
+    [connection] = :ranch.procs(listener, :connections)
+    {:links, links} = Process.info(connection, :links)
+    socket = Enum.find(links, &is_port/1)
+
+    # The driver allocates this buffer for each socket that reads.
+    assert :inet.getopts(socket, [:buffer]) == {:ok, [buffer: 65_536]}
   end
 
   test "a stalled HTTP body releases its listener slot without expiring WebSockets" do
@@ -390,6 +421,120 @@ defmodule PaseoRelay.ListenerTest do
 
     assert {:close, 1013, "Relay memory pressure"} = recv_until_close(first)
     assert {:close, 1013, "Relay memory pressure"} = recv_until_close(second)
+  end
+
+  describe "the OOM guard" do
+    @describetag :linux
+
+    setup do
+      directory = Path.join(System.tmp_dir!(), "oom_guard_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(directory)
+
+      paths = [
+        meminfo: Path.join(directory, "meminfo"),
+        cgroup_max: Path.join(directory, "memory.max"),
+        cgroup_current: Path.join(directory, "memory.current"),
+        cgroup_stat: Path.join(directory, "memory.stat")
+      ]
+
+      Application.put_env(:paseo_relay, :system_memory_paths, paths)
+
+      on_exit(fn ->
+        Application.delete_env(:paseo_relay, :system_memory_paths)
+        PaseoRelay.Capacity.check_now(@capacity_mutation_timeout_ms)
+        File.rm_rf!(directory)
+      end)
+
+      {:ok, paths: paths}
+    end
+
+    test "sheds on low available memory and recovers, without a byte limit", %{paths: paths} do
+      port = PaseoRelay.Listener.port(PaseoRelay.Listener)
+      # In kB, as /proc/meminfo reports it, so that each percentage is exact.
+      total = 16_000_000 * 1024
+      assert PaseoRelay.RuntimeConfig.current().memory_watermark_bytes == 0
+
+      report_memory(paths, total, 20)
+      socket = open_websocket(port, "oom-guard-#{System.unique_integer([:positive])}")
+      assert http_get(port, "/ready") =~ "HTTP/1.1 200 OK"
+      metrics = http_get(port, "/metrics")
+      assert metrics =~ "paseo_relay_system_memory_total_bytes #{total}\n"
+      assert metrics =~ "paseo_relay_system_memory_available_bytes #{div(total * 20, 100)}\n"
+      assert metrics =~ "paseo_relay_oom_floor_bytes #{div(total * 10, 100)}\n"
+      assert metrics =~ "paseo_relay_memory_watermark_bytes 0\n"
+
+      # Below the 10% floor: the socket closes and admission stops.
+      report_memory(paths, total, 9)
+      assert {:close, 1013, "Relay memory pressure"} = recv_until_close(socket)
+      assert http_get(port, "/ready") =~ "HTTP/1.1 503 Service Unavailable"
+
+      rejected = connect_and_request_websocket(port, "oom-guard-rejected")
+      assert {:ok, response} = :gen_tcp.recv(rejected, 0, 2_000)
+      assert response =~ "Relay memory pressure"
+      :gen_tcp.close(rejected)
+
+      # Above the floor but below the 15% recovery level: still closed.
+      report_memory(paths, total, 12)
+      assert http_get(port, "/ready") =~ "HTTP/1.1 503 Service Unavailable"
+
+      report_memory(paths, total, 15)
+      assert http_get(port, "/ready") =~ "HTTP/1.1 200 OK"
+      replacement = open_websocket(port, "oom-guard-#{System.unique_integer([:positive])}")
+      :gen_tcp.close(replacement)
+      :gen_tcp.close(socket)
+    end
+
+    test "uses the container limit when it is below the host memory", %{paths: paths} do
+      port = PaseoRelay.Listener.port(PaseoRelay.Listener)
+      limit = 2 * 1024 * 1024 * 1024
+
+      report_memory(paths, 16 * 1024 * 1024 * 1024, 80)
+      File.write!(paths[:cgroup_max], "#{limit}\n")
+      File.write!(paths[:cgroup_current], "#{div(limit * 95, 100)}\n")
+      :ok = PaseoRelay.Capacity.check_now(@capacity_mutation_timeout_ms)
+
+      assert http_get(port, "/ready") =~ "HTTP/1.1 503 Service Unavailable"
+      assert http_get(port, "/metrics") =~ "paseo_relay_system_memory_total_bytes #{limit}\n"
+
+      File.write!(paths[:cgroup_current], "#{div(limit, 2)}\n")
+      :ok = PaseoRelay.Capacity.check_now(@capacity_mutation_timeout_ms)
+      assert http_get(port, "/ready") =~ "HTTP/1.1 200 OK"
+    end
+
+    test "a 0 floor and an explicit BEAM watermark each replace it", %{paths: paths} do
+      port = PaseoRelay.Listener.port(PaseoRelay.Listener)
+      live = PaseoRelay.RuntimeConfig.get()
+      on_exit(fn -> {:ok, _settings} = PaseoRelay.RuntimeConfig.put(live) end)
+
+      report_memory(paths, 16 * 1024 * 1024 * 1024, 5)
+      assert http_get(port, "/ready") =~ "HTTP/1.1 503 Service Unavailable"
+
+      assert {:ok, _settings} = PaseoRelay.RuntimeConfig.put(%{oom_min_available_percent: 0})
+      assert http_get(port, "/ready") =~ "HTTP/1.1 200 OK"
+      assert http_get(port, "/metrics") =~ "paseo_relay_oom_floor_bytes 0\n"
+
+      assert {:ok, _settings} = PaseoRelay.RuntimeConfig.put(%{oom_min_available_percent: 10})
+      :ok = PaseoRelay.Capacity.check_now(@capacity_mutation_timeout_ms)
+      assert http_get(port, "/ready") =~ "HTTP/1.1 503 Service Unavailable"
+
+      watermark = 64 * 1024 * 1024 * 1024
+      assert {:ok, _settings} = PaseoRelay.RuntimeConfig.put(%{memory_watermark_bytes: watermark})
+      assert http_get(port, "/ready") =~ "HTTP/1.1 200 OK"
+      assert http_get(port, "/metrics") =~ "paseo_relay_oom_floor_bytes 0\n"
+    end
+
+    # Writes a host memory reading and has Capacity act on it.
+    defp report_memory(paths, total_bytes, available_percent) do
+      available_bytes = div(total_bytes * available_percent, 100)
+
+      File.write!(paths[:meminfo], """
+      MemTotal:       #{div(total_bytes, 1024)} kB
+      MemFree:        1024 kB
+      MemAvailable:   #{div(available_bytes, 1024)} kB
+      """)
+
+      :ok = PaseoRelay.Capacity.check_now(@capacity_mutation_timeout_ms)
+    end
   end
 
   defp open_websocket(port, server_id) do

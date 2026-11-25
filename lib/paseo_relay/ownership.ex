@@ -57,7 +57,7 @@ defmodule PaseoRelay.Ownership do
 
   defp claim_route(server_id, target, minimum_cluster_size) do
     cond do
-      draining?() -> {:unavailable, :draining}
+      PaseoRelay.Drain.draining?() -> {:unavailable, :draining}
       not ready?(minimum_cluster_size) -> {:unavailable, :cluster}
       true -> start_or_route(server_id, target)
     end
@@ -88,16 +88,8 @@ defmodule PaseoRelay.Ownership do
 
   defp lookup(server_id), do: :syn.lookup(@scope, server_id)
 
-  defp draining? do
-    if Process.whereis(PaseoRelay.Drain), do: PaseoRelay.Drain.draining?(), else: false
-  end
-
-  defp configured_minimum_cluster_size do
-    :paseo_relay
-    |> Application.get_env(:runtime, PaseoRelay.Config.defaults())
-    |> PaseoRelay.Config.normalize()
-    |> Map.fetch!(:minimum_cluster_size)
-  end
+  defp configured_minimum_cluster_size,
+    do: PaseoRelay.RuntimeConfig.current().minimum_cluster_size
 end
 
 defmodule PaseoRelay.Ownership.Owner do

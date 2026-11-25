@@ -29,6 +29,9 @@ defmodule PaseoRelay.Placement.Homes do
     homes
   end
 
+  @doc "Changes the idle limit that `evict_idle/4` applies."
+  def configure(%__MODULE__{} = homes, max_idle_ms), do: %{homes | max_idle_ms: max_idle_ms}
+
   @doc "Reads the home of `server_id` from the table `table`, from any process."
   def home(table, server_id) when is_atom(table) do
     case :ets.lookup(table, server_id) do

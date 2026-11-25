@@ -4,6 +4,7 @@ defmodule PaseoRelay.Placement.Server do
   # Owns the home map replica, tracks peer readiness and heals sessions.
   #
   # Every tick (one second) the server:
+  #   0. reads the live settings, so a change applies within one tick;
   #   1. asks every relay peer whether it is ready, without blocking;
   #   2. when healing is enabled and this node is not draining, stops up to
   #      `heal_rate_per_sec` local sessions whose home peer has been ready for
@@ -25,30 +26,16 @@ defmodule PaseoRelay.Placement.Server do
   @readiness_timeout_ms 1_000
   @idle_evictions_per_tick 1_000
   @sync_chunk_entries 5_000
-  @settings [:heal_enabled, :heal_delay_ms, :heal_rate_per_sec]
-  @reload_timeout_ms 2_000
 
-  def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
+  def start_link(_options), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   def homes_table, do: @homes_table
 
   def daemon_arrived(server_id), do: GenServer.cast(__MODULE__, {:daemon_arrived, server_id})
 
-  def settings, do: call(:settings, 5_000)
-
-  def reload_settings, do: call(:reload_settings, @reload_timeout_ms)
-
-  def request_reload, do: GenServer.cast(__MODULE__, :reload_settings)
-
-  defp call(message, timeout) do
-    GenServer.call(__MODULE__, message, timeout)
-  catch
-    :exit, _reason -> {:error, :unavailable}
-  end
-
   @impl true
-  def init(config) do
-    config = PaseoRelay.RuntimeConfig.overlay(config)
+  def init(:ok) do
+    config = PaseoRelay.RuntimeConfig.current()
     :ok = :net_kernel.monitor_nodes(true)
     homes = Homes.new(@homes_table, max_idle_ms: config.home_max_idle_ms)
 
@@ -58,11 +45,6 @@ defmodule PaseoRelay.Placement.Server do
     {:ok,
      %{
        homes: homes,
-       cluster_nodes: config.cluster_nodes,
-       minimum_cluster_size: config.minimum_cluster_size,
-       heal_enabled: config.heal_enabled,
-       heal_delay_ms: config.heal_delay_ms,
-       heal_rate_per_sec: config.heal_rate_per_sec,
        ready_since: %{},
        readiness_round: 0,
        applied_round: 0,
@@ -71,26 +53,29 @@ defmodule PaseoRelay.Placement.Server do
   end
 
   @impl true
-  def handle_call(:settings, _from, state), do: {:reply, settings_of(state), state}
-
-  def handle_call(:reload_settings, _from, state), do: {:reply, :ok, reload(state)}
-
-  @impl true
   def handle_cast({:daemon_arrived, server_id}, state) do
     {:noreply, learn_home(state, server_id, now())}
   end
-
-  def handle_cast(:reload_settings, state), do: {:noreply, reload(state)}
 
   @impl true
   def handle_info(:tick, state) do
     schedule_tick()
     now = now()
+    config = PaseoRelay.RuntimeConfig.current()
 
     state =
-      state
+      %{
+        state
+        | homes: Homes.configure(state.homes, config.home_max_idle_ms),
+          attempts:
+            Attempts.configure(
+              state.attempts,
+              config.heal_attempt_window_ms,
+              config.heal_cooldown_ms
+            )
+      }
       |> poll_readiness()
-      |> heal(now)
+      |> heal(config, now)
       |> forget_old_attempts(now)
 
     Homes.evict_idle(
@@ -150,7 +135,7 @@ defmodule PaseoRelay.Placement.Server do
   defp learn_home(state, server_id, now) do
     case Homes.home(@homes_table, server_id) do
       nil ->
-        if cluster_connected?(state), do: set_home(state, server_id), else: state
+        if cluster_connected?(), do: set_home(state, server_id), else: state
 
       home when home == node() ->
         state |> set_home(server_id) |> forget_attempt(server_id)
@@ -188,12 +173,15 @@ defmodule PaseoRelay.Placement.Server do
 
   # Without the full cluster, a daemon that arrives here may have failed over
   # from its unreachable home. Learning a first home here would pin it to this node.
-  defp cluster_connected?(%{cluster_nodes: []} = state),
-    do: PaseoRelay.Ownership.ready?(state.minimum_cluster_size)
+  defp cluster_connected? do
+    case PaseoRelay.RuntimeConfig.current() do
+      %{cluster_nodes: [], minimum_cluster_size: minimum_cluster_size} ->
+        PaseoRelay.Ownership.ready?(minimum_cluster_size)
 
-  defp cluster_connected?(%{cluster_nodes: cluster_nodes}) do
-    connected = [node() | Node.list()]
-    Enum.all?(cluster_nodes, &(&1 in connected))
+      %{cluster_nodes: cluster_nodes} ->
+        connected = [node() | Node.list()]
+        Enum.all?(cluster_nodes, &(&1 in connected))
+    end
   end
 
   # A daemon can stay connected for longer than the idle limit. Its home stays
@@ -218,26 +206,26 @@ defmodule PaseoRelay.Placement.Server do
     %{state | readiness_round: round}
   end
 
-  defp heal(%{heal_enabled: false} = state, _now), do: state
+  defp heal(state, %{heal_enabled: false}, _now), do: state
 
-  defp heal(state, now) do
-    targets = healing_targets(state, now)
+  defp heal(state, config, now) do
+    targets = healing_targets(state, config.heal_delay_ms, now)
 
-    if draining?() or targets == [] do
+    if config.drain or targets == [] do
       state
     else
       state
       |> heal_candidates(targets, now)
-      |> Enum.take(state.heal_rate_per_sec)
+      |> Enum.take(config.heal_rate_per_sec)
       |> Enum.reduce(state, fn {server_id, owner}, state ->
         relocate(state, server_id, owner, now)
       end)
     end
   end
 
-  defp healing_targets(state, now) do
+  defp healing_targets(state, heal_delay_ms, now) do
     for {peer, ready_since} <- state.ready_since,
-        now - ready_since >= state.heal_delay_ms,
+        now - ready_since >= heal_delay_ms,
         do: peer
   end
 
@@ -270,15 +258,6 @@ defmodule PaseoRelay.Placement.Server do
     |> Enum.chunk_every(@sync_chunk_entries)
     |> Enum.each(&send({__MODULE__, peer}, {:home_sync, &1}))
   end
-
-  defp draining? do
-    if Process.whereis(PaseoRelay.Drain), do: PaseoRelay.Drain.draining?(), else: false
-  end
-
-  defp settings_of(state), do: Map.take(state, @settings)
-
-  # Reads the stored settings when the reload is handled, not when it was sent.
-  defp reload(state), do: Map.merge(state, Map.take(PaseoRelay.RuntimeConfig.get(), @settings))
 
   defp now, do: System.monotonic_time(:millisecond)
 

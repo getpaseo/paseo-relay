@@ -146,10 +146,14 @@ defmodule PaseoRelay.RouterIntegrationTest do
 
   test "metrics exposes local names and values", %{port: port} do
     before = PaseoRelay.Metrics.snapshot()
-    {socket, _response} = open_websocket(port, "srv_metrics")
+    {socket, response} = open_websocket(port, "srv_metrics")
 
-    {:ok, <<0x81, sync_bytes, _sync_payload::binary-size(sync_bytes)>>} =
-      :gen_tcp.recv(socket, 0, 2_000)
+    # The initial sync frame arrives with the upgrade response or after it.
+    <<0x81, sync_bytes, _sync_payload::binary-size(sync_bytes)>> =
+      case String.split(response, "\r\n\r\n", parts: 2) do
+        [_headers, ""] -> socket |> :gen_tcp.recv(0, 2_000) |> elem(1)
+        [_headers, frame] -> frame
+      end
 
     metrics = request(port, "/metrics")
 
