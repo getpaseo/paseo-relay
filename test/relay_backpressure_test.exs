@@ -222,7 +222,12 @@ defmodule PaseoRelay.BackpressureTest do
   @tag timeout: 90_000
   test "completed messages cannot exceed the strict node byte budget" do
     port =
-      start_relay(data_attach_timeout: 60_000, delivery_timeout: 60_000, send_timeout: 65_000)
+      start_relay(
+        data_attach_timeout: 60_000,
+        delivery_timeout: 60_000,
+        send_timeout: 65_000,
+        send_buffer: 65_536
+      )
 
     baseline = PaseoRelay.Metrics.value(:active_websockets)
     payload = :binary.copy(<<0x5A>>, @maximum_message_payload_bytes)
@@ -1449,7 +1454,21 @@ defmodule PaseoRelay.BackpressureTest do
         _ = :inet.setopts(socket, packet: :raw)
       end
     end
+    |> maybe_recv_http_body(socket)
   end
+
+  defp maybe_recv_http_body({:ok, headers}, socket) do
+    with false <- String.starts_with?(headers, "HTTP/1.1 101"),
+         [_, length] <- Regex.run(~r/^content-length:\s*(\d+)\r?$/im, headers),
+         size when size > 0 <- String.to_integer(length),
+         {:ok, body} <- :gen_tcp.recv(socket, size, 2_000) do
+      {:ok, headers <> body}
+    else
+      _no_body -> {:ok, headers}
+    end
+  end
+
+  defp maybe_recv_http_body(error, _socket), do: error
 
   defp recv_header_lines(socket, acc) do
     case :gen_tcp.recv(socket, 0, 2_000) do
