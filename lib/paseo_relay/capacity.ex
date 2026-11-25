@@ -51,6 +51,7 @@ defmodule PaseoRelay.Capacity do
 
   @impl true
   def init(config) do
+    config = PaseoRelay.RuntimeConfig.overlay(config)
     schedule_check()
 
     {:ok,
@@ -246,6 +247,9 @@ defmodule PaseoRelay.Capacity do
 
   def handle_call({:value, :backpressured_sources}, _from, state),
     do: {:reply, state.blocked_sources, state}
+
+  def handle_call({:value, :memory_watermark_bytes}, _from, state),
+    do: {:reply, state.watermark, state}
 
   def handle_call(:snapshot, _from, state), do: {:reply, gauges(state), state}
 
@@ -575,7 +579,8 @@ defmodule PaseoRelay.Capacity do
       active_websockets: state.active_websockets,
       ingress_reserved_bytes: state.reserved_bytes,
       inflight_delivery_bytes: state.inflight_bytes,
-      backpressured_sources: state.blocked_sources
+      backpressured_sources: state.blocked_sources,
+      memory_watermark_bytes: state.watermark
     }
   end
 

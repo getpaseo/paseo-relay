@@ -695,3 +695,84 @@
 - The first local minimal-container run exhausted its default descriptor limit
   in the existing unread-control pressure fixture. Repeating with the documented
   real-socket test budget passed; application and pressure-test code were unchanged.
+
+## Session healing and live settings
+
+- Red against `HEAD` before the change, with the new tests copied over the old
+  code: `config_test` failed "loads and validates the session-healing settings";
+  `operations_test` failed the metrics surface test on the missing
+  `paseo_relay_memory_watermark_bytes`, `misplaced_sessions`,
+  `sessions_healed_total` and `home_promotions_total` families; the home-map,
+  arrival and `RuntimeConfig` tests failed because `Placement.Homes`,
+  `Placement.home/1` and `RuntimeConfig.get/0` did not exist; the five `:peer`
+  healing tests failed because the config had no `heal_delay_ms`.
+- Green: `placement_test.exs` starts two full relay applications on real `:peer`
+  nodes with real Cowboy listeners and WebSockex daemons and clients.
+  - Failover and heal-back: a daemon homed on A fails over to B when A stops.
+    While A is down, a new daemon on B gets no home, because B's static cluster
+    is incomplete. When A returns, B waits at least the heal delay, closes the
+    daemon with `1012 Session owner moved`, and the daemon is admitted on A at
+    once, without the Owner's 30-second idle grace.
+  - Idle first and rate cap: with three idle and two client-attached sessions
+    and `heal_rate_per_sec: 2`, the closes arrive in tick batches of 2, 2 and 1.
+    The first batch is idle only and the last is active only.
+  - Health gating: B does not heal toward A while A drains or has memory
+    pressure, and heals after A recovers. After B disconnects from A with a
+    60-second delay and then lowers it to 3 seconds, the heal comes at least 3
+    seconds after the disconnect, so the ready period restarted.
+  - Boomerang: a daemon that returns directly to B after a heal is not moved
+    during the cooldown, is moved once after it, and its second return makes B
+    its home on both nodes with `home_promotions_total 1`. The session then
+    stays on B.
+  - Client-won race: a client claims the session on B; the daemon's direct
+    arrival at A gets `409`, still records A, and B moves the session to A.
+- Green: `placement_arrival_test.exs` binds a listener to `127.0.0.2` and sends
+  raw upgrades from chosen source addresses. Direct v1 and v2 daemon control
+  arrivals record a home. Client and v2 data connections, an upgrade with
+  `x-paseo-rerouted`, and an upgrade from `127.0.0.3` record none, and a later
+  client arrival does not replace a home.
+- Green: `placement_homes_test.exs` proves newest-write-wins with a stable tie
+  break, eviction of the least recently written entry at the entry limit, and
+  bounded idle eviction.
+- Green: `runtime_config_test.exs` rejects each out-of-range value, a wrong
+  type and an unknown key, and one invalid value rejects the whole change. A
+  valid change applies the watermark to Capacity and `/metrics` and the heal
+  settings to Placement while an open daemon socket still answers a ping. The
+  values stay after Capacity and Placement.Server are killed and restarted.
+- Mutation checks against the green code, each caught by the named test:
+  `relocate/1` as a no-op (failover: no `1012`); active sessions before idle
+  ones and no rate cap (idle-first: wrong batches); keeping `ready_since` across
+  unready polls (gating: healed while A drained); no boomerang counting
+  (boomerang: moved during the cooldown); no cluster gate (failover: `unseen`
+  got home B); recording the arrival after the reroute decision (client-won: A
+  never learned the home); any role learning, ignoring the header, and
+  ignoring the peer address (arrival: the matching session got a home).
+
+### Review fixes
+
+- Red against the first green version, each for the reviewed bug:
+  - `placement_attempts_test.exs`: after a first boomerang at a negative
+    monotonic time, the attempt was still kept one cooldown after its cooldown
+    (`size` 1, expected 0). The missing `healed_at` counted as time `0`.
+  - `placement_test.exs` "a daemon that stays connected keeps its home past the
+    idle limit": with a 2-second idle limit, the home of a daemon still
+    connected to A was `nil` on A and B after 4.5 seconds.
+  - `runtime_config_test.exs`: with `Placement.Server` suspended, and with
+    Capacity suspended under a 200 ms mutation timeout, `put/1` returned
+    `{:ok, ...}`.
+  - `placement_homes_test.exs` failed on the missing `evict_idle/4`.
+- Green: an expired first boomerang is forgotten at negative times, and its
+  cooldown still blocks a heal until it ends. Idle eviction rewrites a home
+  whose session is owned on that home and removes the others. Rewritten entries
+  count toward the batch limit, and a newer replicated write still wins. On two
+  `:peer` relays, the connected daemon keeps home A on both nodes while an entry
+  for an ended session is removed. `put/1` returns
+  `Placement is unavailable; nothing changed` and restores the stored settings
+  and Capacity's watermark. After Placement resumes, the late reload applies the
+  previous settings. When Capacity times out, `put/1` returns
+  `Capacity is unavailable; nothing changed`, and Capacity restarts with the
+  previous watermark.
+- Mutation check: without the watermark rollback, the Placement test reads the
+  new watermark in `/metrics`.
+- The heal scan and `misplaced_sessions` fold over the session index instead of
+  copying it each tick. The existing healing tests cover the change.

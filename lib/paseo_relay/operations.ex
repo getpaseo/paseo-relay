@@ -60,6 +60,12 @@ defmodule PaseoRelay.Operations do
 
   def response(_path, _config), do: {404, "text/plain", "not found\n"}
 
+  @doc "Reports whether this node admits new relay work, as `GET /ready` does."
+  def ready? do
+    %{config: config, connection_budget: budget} = operation_options(configured_runtime())
+    ready?(config, capacity_status(budget))
+  end
+
   defp draining?, do: PaseoRelay.Drain.draining?()
 
   defp ready?(config, capacity_status) do

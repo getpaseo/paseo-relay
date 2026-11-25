@@ -7,6 +7,10 @@ defmodule PaseoRelay.PartitionClient do
     {:ok, client}
   end
 
+  # Returns `{:error, %WebSockex.RequestError{code: status}}` for a refused upgrade.
+  def connect(url, observer, headers \\ []),
+    do: WebSockex.start(url, __MODULE__, observer, extra_headers: headers)
+
   @impl true
   def handle_connect(_connection, observer) do
     send(observer, {:partition_open, self()})

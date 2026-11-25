@@ -18,6 +18,12 @@ defmodule PaseoRelay.Config do
             tcp_receive_buffer_bytes: 64 * 1024,
             websocket_max_heap_words: 32 * 1024 * 1024,
             memory_watermark_bytes: 0,
+            heal_enabled: true,
+            heal_delay_ms: 360_000,
+            heal_rate_per_sec: 25,
+            heal_attempt_window_ms: 120_000,
+            heal_cooldown_ms: 1_800_000,
+            home_max_idle_ms: 7 * 24 * 60 * 60 * 1_000,
             ownership_target: "local",
             reroute_header: "x-reroute-target",
             minimum_cluster_size: 1,
@@ -27,6 +33,10 @@ defmodule PaseoRelay.Config do
             cookie: nil
 
   @type t :: %__MODULE__{}
+
+  @memory_watermark_bytes (256 * 1024 * 1024)..(64 * 1024 * 1024 * 1024)
+  @heal_delay_ms 0..86_400_000
+  @heal_rate_per_sec 1..500
 
   @spec load(Enumerable.t()) :: {:ok, t()} | {:error, String.t()}
   def load(environment \\ System.get_env()) do
@@ -119,7 +129,23 @@ defmodule PaseoRelay.Config do
              environment,
              "PASEO_RELAY_MEMORY_WATERMARK_BYTES",
              defaults.memory_watermark_bytes,
-             (256 * 1024 * 1024)..(64 * 1024 * 1024 * 1024)
+             @memory_watermark_bytes
+           ),
+         {:ok, heal_enabled} <-
+           boolean(environment, "PASEO_RELAY_HEAL_ENABLED", defaults.heal_enabled),
+         {:ok, heal_delay_ms} <-
+           integer(
+             environment,
+             "PASEO_RELAY_HEAL_DELAY_MS",
+             defaults.heal_delay_ms,
+             @heal_delay_ms
+           ),
+         {:ok, heal_rate_per_sec} <-
+           integer(
+             environment,
+             "PASEO_RELAY_HEAL_RATE_PER_SEC",
+             defaults.heal_rate_per_sec,
+             @heal_rate_per_sec
            ),
          {:ok, minimum_cluster_size} <-
            integer(
@@ -147,6 +173,9 @@ defmodule PaseoRelay.Config do
          tcp_receive_buffer_bytes: tcp_receive_buffer_bytes,
          websocket_max_heap_words: websocket_max_heap_words,
          memory_watermark_bytes: memory_watermark_bytes,
+         heal_enabled: heal_enabled,
+         heal_delay_ms: heal_delay_ms,
+         heal_rate_per_sec: heal_rate_per_sec,
          ownership_target:
            Map.get(environment, "PASEO_RELAY_OWNERSHIP_TARGET", defaults.ownership_target),
          reroute_header:
@@ -166,6 +195,46 @@ defmodule PaseoRelay.Config do
   @spec normalize(t() | map() | keyword()) :: t()
   def normalize(%__MODULE__{} = config), do: config
   def normalize(settings), do: struct!(__MODULE__, Map.new(settings))
+
+  @doc """
+  Validates settings that may change while the node runs.
+
+  The rules match the environment rules for the same settings. Unknown keys and
+  values of the wrong type are rejected.
+  """
+  @spec validate_live(map()) :: {:ok, map()} | {:error, String.t()}
+  def validate_live(settings) when is_map(settings) do
+    Enum.reduce_while(settings, {:ok, %{}}, fn {key, value}, {:ok, valid} ->
+      case validate_live(key, value) do
+        :ok -> {:cont, {:ok, Map.put(valid, key, value)}}
+        {:error, message} -> {:halt, {:error, message}}
+      end
+    end)
+  end
+
+  defp validate_live(:memory_watermark_bytes, 0), do: :ok
+
+  defp validate_live(:memory_watermark_bytes, value),
+    do: live_integer(:memory_watermark_bytes, value, @memory_watermark_bytes, "0 or ")
+
+  defp validate_live(:heal_enabled, value) when is_boolean(value), do: :ok
+  defp validate_live(:heal_enabled, _value), do: {:error, "heal_enabled must be true or false"}
+
+  defp validate_live(:heal_delay_ms, value),
+    do: live_integer(:heal_delay_ms, value, @heal_delay_ms, "")
+
+  defp validate_live(:heal_rate_per_sec, value),
+    do: live_integer(:heal_rate_per_sec, value, @heal_rate_per_sec, "")
+
+  defp validate_live(key, _value), do: {:error, "#{inspect(key)} is not a live setting"}
+
+  defp live_integer(key, value, range, prefix) do
+    if is_integer(value) and value in range do
+      :ok
+    else
+      {:error, "#{key} must be #{prefix}an integer between #{range.first} and #{range.last}"}
+    end
+  end
 
   defp cluster_nodes(environment) do
     nodes =

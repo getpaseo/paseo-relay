@@ -13,6 +13,7 @@ defmodule PaseoRelay.Application do
       {PaseoRelay.StaticCluster, nodes: config.cluster_nodes},
       {PaseoRelay.Drain, config.drain},
       PaseoRelay.Metrics,
+      {PaseoRelay.Placement, config},
       {PaseoRelay.RuntimeSupervisor, config}
     ]
 

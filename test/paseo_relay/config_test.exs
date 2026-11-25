@@ -116,4 +116,28 @@ defmodule PaseoRelay.ConfigTest do
              {:error,
               "PASEO_RELAY_INGRESS_BUDGET_BYTES must admit one maximum assembled message at the configured weight"}
   end
+
+  test "loads and validates the session-healing settings" do
+    assert %{heal_enabled: true, heal_delay_ms: 360_000, heal_rate_per_sec: 25} =
+             Config.defaults()
+
+    assert {:ok, %{heal_enabled: false, heal_delay_ms: 600_000, heal_rate_per_sec: 500}} =
+             Config.load([
+               {"PASEO_RELAY_HEAL_ENABLED", "false"},
+               {"PASEO_RELAY_HEAL_DELAY_MS", "600000"},
+               {"PASEO_RELAY_HEAL_RATE_PER_SEC", "500"}
+             ])
+
+    assert Config.load([{"PASEO_RELAY_HEAL_ENABLED", "yes"}]) ==
+             {:error, "PASEO_RELAY_HEAL_ENABLED must be true or false"}
+
+    assert Config.load([{"PASEO_RELAY_HEAL_DELAY_MS", "-1"}]) ==
+             {:error, "PASEO_RELAY_HEAL_DELAY_MS must be an integer between 0 and 86400000"}
+
+    assert Config.load([{"PASEO_RELAY_HEAL_RATE_PER_SEC", "0"}]) ==
+             {:error, "PASEO_RELAY_HEAL_RATE_PER_SEC must be an integer between 1 and 500"}
+
+    assert Config.load([{"PASEO_RELAY_HEAL_RATE_PER_SEC", "501"}]) ==
+             {:error, "PASEO_RELAY_HEAL_RATE_PER_SEC must be an integer between 1 and 500"}
+  end
 end
