@@ -121,6 +121,13 @@ defmodule PaseoRelay.Ownership.Owner do
     do: call(owner, {:attach, reservation, socket, connection, writer})
 
   def cancel(owner, reservation), do: GenServer.cast(owner, {:cancel, reservation})
+
+  @doc """
+  Stops the Owner now, without the idle grace. Syn unregisters the session and
+  attached sockets close with `1012 Session owner moved`, so the daemon
+  reconnects and can claim the session on its home node.
+  """
+  def relocate(owner), do: GenServer.cast(owner, :relocate)
   def detach(owner, socket), do: GenServer.cast(owner, {:detach, socket})
   def legacy(owner, socket), do: call(owner, {:legacy, socket})
 
@@ -144,8 +151,12 @@ defmodule PaseoRelay.Ownership.Owner do
   def init({server_id, target}) do
     case :syn.register(:paseo_relay_owners, server_id, self(), target) do
       :ok ->
+        PaseoRelay.Placement.session_started(server_id)
+
         {:ok,
          %{
+           server_id: server_id,
+           client_count: 0,
            reservations: %{},
            sockets: %{},
            v1: %{server: nil, client: nil},
@@ -243,7 +254,7 @@ defmodule PaseoRelay.Ownership.Owner do
         state =
           if attachment, do: attach_connection(state, socket, elem(attachment, 0)), else: state
 
-        {:reply, :ok, state}
+        {:reply, :ok, track_clients(state)}
     end
   end
 
@@ -260,6 +271,7 @@ defmodule PaseoRelay.Ownership.Owner do
   end
 
   def handle_cast({:detach, socket}, state), do: {:noreply, remove_socket(state, socket)}
+  def handle_cast(:relocate, state), do: {:stop, :normal, state}
 
   @impl true
   def handle_info({:expired, token}, state),
@@ -309,6 +321,9 @@ defmodule PaseoRelay.Ownership.Owner do
 
   def handle_info(:idle, state), do: {:noreply, state}
 
+  @impl true
+  def terminate(_reason, state), do: PaseoRelay.Placement.session_stopped(state.server_id)
+
   defp remove_socket(state, socket) do
     case Map.pop(state.sockets, socket) do
       {nil, _} ->
@@ -320,6 +335,7 @@ defmodule PaseoRelay.Ownership.Owner do
         %{state | sockets: sockets}
         |> detach_connection(socket, connection)
         |> reject_source_waiters(socket)
+        |> track_clients()
         |> idle_when_empty()
     end
   end
@@ -483,6 +499,24 @@ defmodule PaseoRelay.Ownership.Owner do
 
     Enum.each(matching, fn {_key, waiter} -> Process.cancel_timer(waiter.timer) end)
     %{state | waiting: Map.new(waiting)}
+  end
+
+  # The heal scan reads this count from the Placement index; idle sessions move first.
+  defp track_clients(state) do
+    count = client_count(state)
+
+    if count != state.client_count,
+      do: PaseoRelay.Placement.session_clients(state.server_id, count)
+
+    %{state | client_count: count}
+  end
+
+  defp client_count(state) do
+    v1_clients = if state.v1.client, do: 1, else: 0
+
+    Enum.reduce(state.clients, v1_clients, fn {_connection_id, sockets}, count ->
+      count + MapSet.size(sockets)
+    end)
   end
 
   defp opposite(:server), do: :client

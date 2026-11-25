@@ -10,10 +10,16 @@ defmodule PaseoRelay.Socket do
   alias PaseoRelay.HandshakeValidation
   alias PaseoRelay.Ownership.Owner
 
+  # A deployment adapter that forwards a rerouted upgrade sets this header.
+  @rerouted_header "x-paseo-rerouted"
+
   @impl true
   def init(request, options) do
     with true <- :cowboy_websocket.is_upgrade_request(request),
          {:ok, connection} <- connection(request),
+         # Before routing: a daemon that reaches its home node after a client
+         # claimed the session elsewhere still records this node as its home.
+         :ok <- record_daemon_arrival(connection, request, options.config),
          # Cowboy runs this callback in a request process; request.pid owns the
          # connection before and after the WebSocket upgrade.
          {:local, owner, reservation, admission} <-
@@ -377,6 +383,30 @@ defmodule PaseoRelay.Socket do
 
     PaseoRelay.Connection.from_query(query)
   end
+
+  defp record_daemon_arrival(connection, request, config) do
+    if daemon_control?(connection) and direct_arrival?(request, config.ip) do
+      PaseoRelay.Placement.daemon_arrived(connection.server_id)
+    end
+
+    :ok
+  end
+
+  defp daemon_control?(%{role: :server, version: 1}), do: true
+  defp daemon_control?(%{role: :server, version: 2, connection_id: ""}), do: true
+  defp daemon_control?(_connection), do: false
+
+  # Direct means the upgrade did not come through another node's reroute. When
+  # the listener binds one address, a same-host proxy connects from that
+  # address while a remote node's reroute does not.
+  defp direct_arrival?(request, bound_ip) do
+    {peer_ip, _port} = :cowboy_req.peer(request)
+
+    :cowboy_req.header(@rerouted_header, request) == :undefined and
+      (wildcard?(bound_ip) or peer_ip == bound_ip)
+  end
+
+  defp wildcard?(ip), do: ip in [{0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0}]
 
   defp admit({namespace, limit}, holder, timeout),
     do: Capacity.admit_connection(namespace, limit, holder, timeout)

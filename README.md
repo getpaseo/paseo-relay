@@ -56,7 +56,10 @@ generic:
 | `PASEO_RELAY_DATA_ATTACH_TIMEOUT_MS` | `15000` | Maximum time a v2 client frame waits for its daemon-data socket. |
 | `PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES` | `65536` | Per-socket TCP receive buffer. |
 | `PASEO_RELAY_WEBSOCKET_MAX_HEAP_WORDS` | `33554432` | Per-WebSocket BEAM heap fuse, including shared binaries. Values below this protocol-safe floor are rejected. |
-| `PASEO_RELAY_MEMORY_WATERMARK_BYTES` | `0` | Optional BEAM total-memory watermark that pauses admission and sheds WebSockets with `1013` until measured memory reaches the recovery threshold; disabled generically because the safe threshold depends on the deployment memory limit. |
+| `PASEO_RELAY_MEMORY_WATERMARK_BYTES` | `0` | Optional BEAM total-memory watermark that pauses admission and sheds WebSockets with `1013` until measured memory reaches the recovery threshold; disabled generically because the safe threshold depends on the deployment memory limit. Can change live; see [Live settings](#live-settings). |
+| `PASEO_RELAY_HEAL_ENABLED` | `true` | Move sessions back to their home node after a failover. See [Session healing](#session-healing). Can change live. |
+| `PASEO_RELAY_HEAL_DELAY_MS` | `360000` | Time a home node must stay ready before this node moves sessions back to it, from 0 to 86400000. Set it above the time a reconnecting daemon needs to reach the home node again, for example the DNS TTL of the relay name. Can change live. |
+| `PASEO_RELAY_HEAL_RATE_PER_SEC` | `25` | Maximum number of sessions one node moves per second, from 1 to 500. Can change live. |
 | `RELEASE_NODE` / `RELEASE_COOKIE` | unset | Standard distributed-release identity. |
 
 `GET /health` is a liveness probe. `GET /ready` returns `200` only while the
@@ -66,9 +69,11 @@ not answer its one-second status observation, during a memory-pressure episode,
 or while the application WebSocket ceiling is full. Temporary ingress-byte occupancy does not make the application unready. `GET
 /metrics` is Prometheus text and exposes readiness, draining, active WebSockets,
 active sessions, reroutes, connection rejections, delivery pressure and latency,
-frame sizes, slow-consumer closes, ingress reservations, and BEAM memory for the
-local node. If Capacity is unavailable, its four gauge families are omitted
-rather than reported as zero.
+frame sizes, slow-consumer closes, ingress reservations, the applied memory
+watermark, misplaced sessions, healed sessions, home promotions, and BEAM memory
+for the local node. If Capacity is unavailable, its five gauge families,
+including `paseo_relay_memory_watermark_bytes`, are omitted rather than
+reported as zero.
 
 State-changing Capacity decisions use a separate configured fail-closed
 boundary. Each caller captures the current ledger PID; a timeout kills that
@@ -117,6 +122,101 @@ per-WebSocket heap fuse, and configured node memory watermark limit and shed
 this staging risk; they do not provide a strict pre-parser memory reservation.
 Generic operators should set a nonzero watermark from their runtime limit;
 blocked deliveries are shed first.
+
+## Session healing
+
+A session can stay on a slower node after a failover, a restart, a memory-pressure
+shed, or a client that claims the session before its daemon. Session healing
+moves the session back to its home node. Daemons and clients need no change.
+
+The home of a session is the node where its daemon control connection arrives
+directly. A daemon control connection is a v1 `role=server` connection or a v2
+`role=server` connection with an empty `connectionId`. Client connections and v2
+daemon data connections never set or change a home. The relay records the
+arrival before it decides to reroute, so a daemon that gets a `409` at its home
+still sets that home.
+
+An upgrade is direct when both conditions are true:
+
+1. The request has no `x-paseo-rerouted` header.
+2. If `PASEO_RELAY_HOST` is a specific address, the TCP peer address is the same
+   address. With `0.0.0.0` or `::`, only the header decides.
+
+A deployment adapter must follow this rule. A same-host proxy for public traffic
+connects from the `PASEO_RELAY_HOST` address. A proxy that forwards a rerouted
+upgrade to another node connects from a different address or sets
+`x-paseo-rerouted`.
+
+A node records a first home for a `serverId` only when its cluster is complete:
+every `PASEO_RELAY_CLUSTER_NODES` peer is connected, or the
+`PASEO_RELAY_MIN_CLUSTER_SIZE` floor is met when no static peers are set. This
+stops a daemon that failed over during an outage from being pinned to the
+fallback node.
+
+Each node keeps a copy of every home and sends each change to all connected
+nodes. A node that connects receives a full copy. The newest write wins. A node
+keeps at most 200,000 homes and removes the oldest home when the map is full. A
+direct arrival at the home node writes the home again. A home that was not
+written for 7 days is removed, unless its session is owned on that home node
+now: a daemon that stays connected keeps its home, and the node writes it again.
+
+Each node asks its peers once per second whether they are ready, with the same
+rule as `GET /ready` and a one-second timeout. A peer that drains, has memory
+pressure, is full, does not answer, or disconnects stops being ready at the next
+poll, or at once on disconnect. Its ready period then starts again.
+
+Once per second, if healing is enabled and the node is not draining, the node
+selects the sessions it owns whose home has been ready for
+`PASEO_RELAY_HEAL_DELAY_MS`. Sessions with no client connections go first. It
+moves at most `PASEO_RELAY_HEAL_RATE_PER_SEC` of them: the session Owner stops at
+once, without the 30-second idle grace, and its WebSockets close with
+`1012 Session owner moved`. The daemon reconnects and claims its home. A node
+does not move the same session again for 120 seconds.
+
+A daemon can return directly to the node that moved it, for example because its
+network now prefers that node. If it returns within 120 seconds while its home is
+ready, the node waits 30 minutes before it moves that session again. If the
+daemon returns a second time, the node becomes its home and increments
+`paseo_relay_home_promotions_total`.
+
+Known limits:
+
+- A client that reconnects before the daemon can claim the session on another
+  node again. The node then moves the session again after 120 seconds.
+- If a home node leaves the cluster permanently, its sessions stay counted in
+  `paseo_relay_misplaced_sessions` until their homes expire after 7 days.
+
+The session metrics are:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `paseo_relay_misplaced_sessions` | gauge | Sessions this node owns whose home is another node. |
+| `paseo_relay_sessions_healed_total` | counter | Session Owners this node stopped to move sessions to their home. |
+| `paseo_relay_home_promotions_total` | counter | Homes moved to this node after a daemon returned twice. |
+
+## Live settings
+
+You can change four settings on a running node without a restart:
+`memory_watermark_bytes`, `heal_enabled`, `heal_delay_ms` and
+`heal_rate_per_sec`. They use the same validation as their environment
+settings. Existing WebSockets stay open. A watermark below the current memory
+starts the normal memory-pressure shedding.
+
+```sh
+bin/paseo_relay rpc 'IO.inspect(PaseoRelay.RuntimeConfig.put(%{memory_watermark_bytes: 5_368_709_120}))'
+bin/paseo_relay rpc 'IO.inspect(PaseoRelay.RuntimeConfig.get())'
+```
+
+`put/1` returns `{:ok, settings}` or `{:error, message}`. An invalid value
+rejects the whole change. If Capacity or Placement does not answer, `put/1`
+returns `{:error, "Capacity is unavailable; nothing changed"}` or
+`{:error, "Placement is unavailable; nothing changed"}` and the node keeps the
+previous values. Capacity fails closed and restarts, as for any Capacity
+timeout. `put/1` waits at most 2 seconds for Placement. The node keeps the
+values when Capacity or Placement restarts inside the same VM. A new VM reads
+the environment again, so also change the environment setting.
+`paseo_relay_memory_watermark_bytes` reports the watermark that Capacity
+applies now; `0` means disabled.
 
 Build a production release with `MIX_ENV=prod asdf exec mix release`, or build
 the generic container with `docker build -t paseo-relay .`.

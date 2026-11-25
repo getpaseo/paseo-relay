@@ -28,6 +28,14 @@ defmodule PaseoRelay.Metrics do
      "WebSockets closed by node memory-pressure recovery."},
     {:max_frame_bytes, :gauge, "max_frame_bytes",
      "Largest WebSocket frame payload observed since node start."},
+    {:memory_watermark_bytes, :gauge, "memory_watermark_bytes",
+     "BEAM memory watermark that Capacity applies now; 0 means disabled."},
+    {:misplaced_sessions, :gauge, "misplaced_sessions",
+     "Sessions owned by this node whose home is another node."},
+    {:sessions_healed, :counter, "sessions_healed_total",
+     "Session Owners this node stopped so that the daemon reconnects to its home node."},
+    {:home_promotions, :counter, "home_promotions_total",
+     "Session homes moved to this node after a daemon returned here twice after a heal."},
     {:beam_total_memory, :gauge, "beam_total_memory_bytes", "Total memory allocated by BEAM."},
     {:beam_process_memory, :gauge, "beam_process_memory_bytes",
      "Memory allocated by BEAM processes."},
@@ -52,8 +60,8 @@ defmodule PaseoRelay.Metrics do
     {@maximum_message_payload_bytes, :frame_size_le_32m,
      Integer.to_string(@maximum_message_payload_bytes)}
   ]
-  @computed_names ~w(active_websockets active_sessions ingress_reserved_bytes inflight_delivery_bytes backpressured_sources max_frame_bytes beam_total_memory beam_process_memory beam_binary_memory beam_ets_memory)a
-  @capacity_names ~w(active_websockets ingress_reserved_bytes inflight_delivery_bytes backpressured_sources)a
+  @computed_names ~w(active_websockets active_sessions ingress_reserved_bytes inflight_delivery_bytes backpressured_sources memory_watermark_bytes misplaced_sessions max_frame_bytes beam_total_memory beam_process_memory beam_binary_memory beam_ets_memory)a
+  @capacity_names ~w(active_websockets ingress_reserved_bytes inflight_delivery_bytes backpressured_sources memory_watermark_bytes)a
   @handshake_outcomes [:accepted, :rejected]
   @handshake_versions [1, 2]
   @handshake_types [:hello, :e2ee_hello]
@@ -82,10 +90,12 @@ defmodule PaseoRelay.Metrics do
              :active_websockets,
              :ingress_reserved_bytes,
              :inflight_delivery_bytes,
-             :backpressured_sources
+             :backpressured_sources,
+             :memory_watermark_bytes
            ],
       do: PaseoRelay.Capacity.value(name)
 
+  def value(:misplaced_sessions), do: PaseoRelay.Placement.misplaced_sessions()
   def value(:active_sessions), do: :syn.local_registry_count(:paseo_relay_owners)
   def value(:beam_total_memory), do: :erlang.memory(:total)
   def value(:beam_process_memory), do: :erlang.memory(:processes)
