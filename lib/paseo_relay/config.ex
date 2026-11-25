@@ -15,7 +15,7 @@ defmodule PaseoRelay.Config do
             transport_send_timeout_ms: 35_000,
             control_queue_bytes: 1024 * 1024,
             data_attach_timeout_ms: 15_000,
-            tcp_receive_buffer_bytes: 64 * 1024,
+            tcp_receive_buffer_bytes: 1024 * 1024,
             websocket_max_heap_words: 32 * 1024 * 1024,
             memory_watermark_bytes: 0,
             heal_enabled: true,

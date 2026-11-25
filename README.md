@@ -54,13 +54,26 @@ generic:
 | `PASEO_RELAY_TRANSPORT_SEND_TIMEOUT_MS` | `35000` | TCP send timeout. Must be greater than the Writer deadline so application shedding is recorded before the transport's final fallback. |
 | `PASEO_RELAY_CONTROL_QUEUE_BYTES` | `1048576` | Per-destination bound for queued control notifications. |
 | `PASEO_RELAY_DATA_ATTACH_TIMEOUT_MS` | `15000` | Maximum time a v2 client frame waits for its daemon-data socket. |
-| `PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES` | `65536` | Per-socket TCP receive buffer. |
+| `PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES` | `1048576` | Requested per-socket TCP receive buffer (1 MiB); allowed range 4096–1048576 bytes. |
 | `PASEO_RELAY_WEBSOCKET_MAX_HEAP_WORDS` | `33554432` | Per-WebSocket BEAM heap fuse, including shared binaries. Values below this protocol-safe floor are rejected. |
 | `PASEO_RELAY_MEMORY_WATERMARK_BYTES` | `0` | Optional BEAM total-memory watermark that pauses admission and sheds WebSockets with `1013` until measured memory reaches the recovery threshold; disabled generically because the safe threshold depends on the deployment memory limit. Can change live; see [Live settings](#live-settings). |
 | `PASEO_RELAY_HEAL_ENABLED` | `true` | Move sessions back to their home node after a failover. See [Session healing](#session-healing). Can change live. |
 | `PASEO_RELAY_HEAL_DELAY_MS` | `360000` | Time a home node must stay ready before this node moves sessions back to it, from 0 to 86400000. Set it above the time a reconnecting daemon needs to reach the home node again, for example the DNS TTL of the relay name. Can change live. |
 | `PASEO_RELAY_HEAL_RATE_PER_SEC` | `25` | Maximum number of sessions one node moves per second, from 1 to 500. Can change live. |
 | `RELEASE_NODE` / `RELEASE_COOKIE` | unset | Standard distributed-release identity. |
+
+The receive buffer allows large frames to make progress over high-RTT paths,
+including a remote ingress proxy. It is set when the listener starts; changing
+the environment requires a relay restart. To restore the previous setting, set
+`PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES=65536` and restart through the deployment's
+drained rollout procedure.
+
+Socket buffers consume kernel memory, outside the BEAM memory watermark and
+complete-message ingress budget. Linux doubles the requested `SO_RCVBUF` for
+accounting and caps it against host limits. The limit is not a preallocation,
+but simultaneous slow readers can grow aggregate socket memory substantially.
+Validate effective socket limits, host/cgroup memory and slow-reader behavior
+at the deployment's connection count before rolling out a larger buffer.
 
 `GET /health` is a liveness probe. `GET /ready` returns `200` only while the
 node accepts new work, and returns `503 {"status":"unready"}` while draining

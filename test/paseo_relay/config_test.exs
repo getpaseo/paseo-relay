@@ -7,6 +7,16 @@ defmodule PaseoRelay.ConfigTest do
     assert Config.load([]) == {:ok, Config.defaults()}
   end
 
+  test "defaults to a 1 MiB WAN receive buffer and permits a bounded rollback" do
+    assert {:ok, %{tcp_receive_buffer_bytes: 1_048_576}} = Config.load([])
+
+    assert {:ok, %{tcp_receive_buffer_bytes: 65_536}} =
+             Config.load([{"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", "65536"}])
+
+    assert {:error, _} =
+             Config.load([{"PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES", "1048577"}])
+  end
+
   test "loads and validates the Capacity mutation timeout" do
     assert Config.defaults().capacity_mutation_timeout_ms == 5_000
 

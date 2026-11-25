@@ -28,6 +28,10 @@ defmodule PaseoRelay.ListenerTest do
        max_connections: 10}
     )
 
+    # Assert the actual Ranch listener receives the configured WAN buffer.
+    # Kernel getsockopt values depend on host limits and Linux doubles SO_RCVBUF.
+    assert :ranch.get_transport_options(listener).socket_opts[:recbuf] == 1_048_576
+
     port = PaseoRelay.Listener.port(listener)
     {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
     :ok = :gen_tcp.send(socket, "GET /health HTTP/1.1\r\nHost: relay.test\r\n\r\n")

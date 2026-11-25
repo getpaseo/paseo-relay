@@ -776,3 +776,38 @@
   new watermark in `/metrics`.
 - The heal scan and `misplaced_sessions` fold over the session index instead of
   copying it each tick. The existing healing tests cover the change.
+
+## Receive buffer for high-RTT ingress
+
+- Reproduction: the pinned image with a 64 KiB receive buffer and a synthetic
+  24 MiB response over a 210 ms delayed local TCP path made the real Paseo SDK
+  miss two heartbeat replies and disconnect after 50 seconds. Changing only
+  the buffer to 1 MiB kept it connected throughout 60 seconds. The peer queued
+  pong replies promptly; ordered delivery held them behind the large response.
+  This is a conditional mechanism test, not attribution of issue #8491; the
+  responder substitutes opaque framing for E2EE and the response size is synthetic.
+- Red: the new default/rollback config regression failed on 65536 versus
+  1048576 (9/10 config tests passed). The previous override remains valid and
+  values above the existing 1 MiB maximum remain rejected.
+- Change: increase the default only; retain all admission, heap, delivery,
+  watermark and maximum-buffer limits. The real listener test checks Ranch's
+  effective configured socket options rather than assuming a host kernel limit.
+- Deployment constraint: kernel socket memory is outside the BEAM watermark.
+  Aggregate slow-reader memory at fleet scale remains a rollout qualification;
+  the per-socket maximum is not preallocated memory. Roll back through the
+  explicit 65536-byte environment override and a drained relay replacement.
+- Candidate image built locally as `paseo-relay:receive-buffer-1mib`. Runtime
+  RPC reads 1048576 without an environment override. Two completed real-SDK
+  24 MiB / 210 ms runs stayed connected through 60 seconds. An earlier attempt
+  timed out during connection setup before the large transfer; its exact cause
+  remains unestablished. The retained harness now subscribes to data frames
+  before awaiting upgrade, removing a possible missed-first-frame race.
+- Verification qualification: formatting and warnings-as-errors compilation
+  passed. Full suite: 104/107; the ingress-budget maximum-frame receipt timed
+  out again in isolation with BOTH the new 1 MiB and original 64 KiB defaults.
+  The slow-reader shedding and initial control-notification tests failed in
+  the suite but passed individually with both defaults. No assertions or
+  safety limits were relaxed to obtain a green result. This is not an
+  all-green release gate. Raw logs and baseline source are retained under
+  `.artifacts/receive-buffer-change/`.
+- Focused configuration and real-listener verification passed 20/20.
