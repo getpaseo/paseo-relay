@@ -276,8 +276,8 @@ the whole change.
 | --- | --- |
 | `drain` | To the next readiness check and upgrade. `PaseoRelay.Drain.begin/0` and `cancel/0` set this key. |
 | `minimum_cluster_size` | To the next readiness check and upgrade. |
-| `connections_per_acceptor` | At once. A full node admits again. Connections above a lowered ceiling stay open. |
-| `tcp_user_buffer_bytes`, `transport_send_timeout_ms` | At once, to the listen socket and to every open socket. |
+| `connections_per_acceptor` | At once, without a call to the open sockets. A full node admits again. Connections above a lowered ceiling stay open. |
+| `tcp_user_buffer_bytes`, `transport_send_timeout_ms` | At once, to the listen socket and to every open socket. `put/1` returns after one call for each open socket, so allow for that time on a full node. |
 | `tcp_receive_buffer_bytes` | A number: at once, to the listen socket and to every open socket. `:auto`: to the sockets of a listener that starts after the change, because a socket cannot return to kernel sizing. |
 | `http_idle_timeout_ms` | To new connections. |
 | `capacity_mutation_timeout_ms`, `data_attach_timeout_ms` | To the next message of every socket. |

@@ -70,7 +70,11 @@ defmodule PaseoRelay.Listener do
           | idle_timeout: config.http_idle_timeout_ms
         })
 
-      for socket <- sockets(reference), do: :inet.setopts(socket, socket_options)
+      # One call for each open socket is slow on a full node, so only a changed
+      # socket option pays for it.
+      if socket_options != live_socket_options(previous) do
+        for socket <- sockets(reference), do: :inet.setopts(socket, socket_options)
+      end
     end
 
     :ok

@@ -869,3 +869,11 @@
 - Verification: `scripts/ci.sh` passed: format, warnings as errors, the full
   suite (150 passed), the production release and the container health,
   readiness, metrics and restart checks.
+- Red, socket loop: a change of only `connections_per_acceptor` and
+  `http_idle_timeout_ms` wrote the socket options of every open socket again.
+  A socket with a `send_timeout` of 12345 that no setting holds read 35000
+  after the change (10 of 11). On a full node that loop is longer than an RPC
+  timeout.
+- Green: the listener calls the open sockets only when `buffer`, `recbuf` or
+  `send_timeout` changed. The socket keeps 12345 after the ceiling change and
+  reads 40000 after a change of `transport_send_timeout_ms`.

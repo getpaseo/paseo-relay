@@ -164,6 +164,28 @@ defmodule PaseoRelay.RuntimeConfigTest do
     assert :ranch.get_protocol_options(@listener).idle_timeout == 20_000
   end
 
+  test "a change without a socket option does not touch the open sockets" do
+    connections = connection_sockets()
+    daemon = open_daemon(server_id("untouched"))
+    [open] = connection_sockets() -- connections
+
+    # A value that no setting holds shows whether the node writes the socket.
+    :ok = :inet.setopts(open, send_timeout: 12_345)
+
+    assert {:ok, _settings} =
+             RuntimeConfig.put(%{connections_per_acceptor: 600, http_idle_timeout_ms: 20_000})
+
+    assert :ranch.get_max_connections(@listener) == 600
+    assert :ranch.get_protocol_options(@listener).idle_timeout == 20_000
+    assert :inet.getopts(open, [:send_timeout]) == {:ok, [send_timeout: 12_345]}
+
+    assert {:ok, _settings} = RuntimeConfig.put(%{transport_send_timeout_ms: 40_000})
+    assert :inet.getopts(open, [:send_timeout]) == {:ok, [send_timeout: 40_000]}
+
+    close(daemon)
+    await_no_active_websockets()
+  end
+
   @tag timeout: 30_000
   test "a higher socket ceiling admits WebSockets on a full node and keeps the open ones" do
     assert {:ok, _settings} = RuntimeConfig.put(%{connections_per_acceptor: 1})
